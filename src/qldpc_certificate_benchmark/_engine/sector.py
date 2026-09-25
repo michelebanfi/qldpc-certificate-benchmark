@@ -30,7 +30,7 @@ class Sector:
     """Everything needed to decode and certify one sector (Z or X) of a shot."""
     name: str
     Hdec: np.ndarray           # (m, n) int8 -- syndrome rows
-    Hdec_csr: csr_matrix       # float64 copy for BP
+    Hdec_csr: csr_matrix       # unused in the library (kept for the selftest)
     H_log: np.ndarray          # (k, n) int64 -- logical rows of the full matrix
     H_aug: np.ndarray          # (m+k, n) int8 -- [Hdec; H_log]
     channel_probs: np.ndarray  # (n,)
@@ -48,6 +48,26 @@ class Sector:
     # _ensure_cluster_graph for the certified cluster decomposition
     graph_indptr: np.ndarray = field(repr=False, default=None)
     graph_indices: np.ndarray = field(repr=False, default=None)
+    # int64 CSR copies of Hdec / H_aug for the numpy re-verification checks,
+    # built lazily by hdec_mod2 / haug_mod2.  A dense int64 matvec allocates an
+    # m x n temporary per check (~260 MB, 16 ms on a d=11 surface-code DEM);
+    # the sparse product is exact integer arithmetic, just ~400x cheaper.
+    Hdec_sp: csr_matrix = field(repr=False, default=None)
+    H_aug_sp: csr_matrix = field(repr=False, default=None)
+
+
+def hdec_mod2(sector, x):
+    """Hdec @ x mod 2 (int64) via a cached sparse copy of Hdec."""
+    if sector.Hdec_sp is None:
+        sector.Hdec_sp = csr_matrix(sector.Hdec, dtype=np.int64)
+    return (sector.Hdec_sp @ np.asarray(x, dtype=np.int64)) % 2
+
+
+def haug_mod2(sector, x):
+    """H_aug @ x mod 2 (int64) via a cached sparse copy of H_aug."""
+    if sector.H_aug_sp is None:
+        sector.H_aug_sp = csr_matrix(sector.H_aug, dtype=np.int64)
+    return (sector.H_aug_sp @ np.asarray(x, dtype=np.int64)) % 2
 
 
 def make_sector(name, Hdec, H_full, first_logical_row, channel_probs, k,
@@ -88,7 +108,7 @@ def make_sector(name, Hdec, H_full, first_logical_row, channel_probs, k,
         masks[1 + i, m + i] = 1           # mask 1+i: wrong-bit-i search
     return Sector(
         name=name, Hdec=Hdec,
-        Hdec_csr=csr_matrix(np.asarray(Hdec, dtype=np.float64)),
+        Hdec_csr=None,
         H_log=H_log, H_aug=H_aug, channel_probs=channel_probs, w=w,
         powers=1 << np.arange(k, dtype=np.int64),
         engine=CertEngine(H_aug, m, w, pool_cap=pool_cap), masks=masks)
@@ -98,7 +118,7 @@ def _verify_witness(sector, b_full, row_active, support, value, context):
     """Independent numpy re-check of an exact-min certificate witness."""
     x = np.zeros(sector.H_aug.shape[1], dtype=np.int64)
     x[support] = 1
-    lhs = sector.H_aug.astype(np.int64) @ x % 2
+    lhs = haug_mod2(sector, x)
     act = row_active.astype(bool)
     assert np.array_equal(lhs[act], b_full.astype(np.int64)[act]), \
         f"{sector.name}/{context}: witness violates its system"
@@ -115,7 +135,7 @@ def _witness_eval(sector, s, x, verify=True):
     """
     x = np.asarray(x, dtype=np.int64)
     if verify:
-        assert np.array_equal(sector.Hdec.astype(np.int64) @ x % 2,
+        assert np.array_equal(hdec_mod2(sector, x),
                               np.asarray(s, dtype=np.int64)), \
             f"{sector.name}: witness violates the syndrome"
     cost = float(sector.w @ x)

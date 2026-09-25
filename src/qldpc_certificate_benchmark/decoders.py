@@ -32,7 +32,7 @@ from enum import Enum
 
 import numpy as np
 
-from ._engine.sector import pack_class
+from ._engine.sector import pack_class, hdec_mod2
 
 __all__ = [
     "Role", "Decoder", "FunctionDecoder", "BPOSD", "Tesseract", "Simplex",
@@ -78,8 +78,7 @@ def _result_from_correction(sector, s, corr):
     if corr.size != sector.Hdec.shape[1]:
         raise ValueError(f"correction has length {corr.size}, expected "
                          f"{sector.Hdec.shape[1]} (number of columns of H)")
-    if not np.array_equal(sector.Hdec.astype(np.int64) @ corr % 2,
-                          np.asarray(s, dtype=np.int64)):
+    if not np.array_equal(hdec_mod2(sector, corr), np.asarray(s, dtype=np.int64)):
         return DecodeResult(ell=None, correction=None, invalid=True)
     return DecodeResult(ell=pack_class(sector.H_log @ corr % 2, sector.powers),
                         correction=corr)
@@ -264,8 +263,7 @@ class Tesseract(Decoder):
             if errs:
                 x = np.zeros(sector.H_aug.shape[1], dtype=np.int64)
                 x[sector.dem_kept_cols[np.asarray(errs, dtype=np.int64)]] = 1
-                if np.array_equal(sector.Hdec.astype(np.int64) @ x % 2,
-                                  np.asarray(s, dtype=np.int64)):
+                if np.array_equal(hdec_mod2(sector, x), np.asarray(s, dtype=np.int64)):
                     res.correction = x
         return res
 

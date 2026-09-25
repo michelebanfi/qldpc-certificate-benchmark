@@ -253,7 +253,9 @@ def _adaptive_lp(H_aug, row_active, b, w, max_rounds=12,
     xr = np.rint(x)
     if np.all(np.abs(x - xr) < 1e-6):
         xb = xr.astype(np.int64)
-        if np.array_equal((A_act.astype(np.int64) @ xb) & 1, b_act):
+        # parity of every active row from its support (no dense matvec)
+        par = np.array([int(xb[s].sum()) & 1 for s in supports], dtype=np.int64)
+        if np.array_equal(par, b_act):
             witness = np.flatnonzero(xb).astype(np.int64)
             if keep is not None:
                 witness = keep[witness]
@@ -399,9 +401,10 @@ def _ilp_any_wrong_below(Hdec, H_log, syndrome, true_logical, w, cap,
     if res.x is not None and np.all(np.isfinite(res.x)):
         x = np.rint(res.x[:n]).astype(np.int8)
         if (np.all((x == 0) | (x == 1))
-                and np.array_equal(Hdec.astype(np.int64) @ x % 2, syndrome)
-                and not np.array_equal(H_log.astype(np.int64) @ x % 2,
-                                       true_logical)
+                and np.array_equal(csr_matrix(Hdec, dtype=np.int64)
+                                   @ x.astype(np.int64) % 2, syndrome)
+                and not np.array_equal(np.asarray(H_log, dtype=np.int64)
+                                       @ x.astype(np.int64) % 2, true_logical)
                 and float(w @ x) <= cap + 1e-7):
             return ST_MIN, np.flatnonzero(x).astype(np.int64)
     return ST_BUDGET, None

@@ -31,7 +31,7 @@ import numpy as np
 from .config import CertConfig, DEFAULT_CFG
 from .decoders import Role, as_decoder
 from ._engine.constants import V_SUCCESS, V_FAIL, V_TIE, V_BUDGET
-from ._engine.sector import make_sector, pack_class, _witness_eval
+from ._engine.sector import make_sector, pack_class, _witness_eval, hdec_mod2, haug_mod2
 from ._engine.verdicts import certify_sector
 
 __all__ = ["Certifier", "Certificate", "VERDICTS"]
@@ -131,8 +131,7 @@ class Certifier:
         sec = self.sector
         b_true = np.concatenate([s, lam_bits.astype(np.int8)]).astype(np.uint8)
         E = np.asarray(self._anchor_dec.decode(b_true), dtype=np.int64)
-        if not np.array_equal(sec.H_aug.astype(np.int64) @ E % 2,
-                              b_true.astype(np.int64)):
+        if not np.array_equal(haug_mod2(sec, E), b_true.astype(np.int64)):
             raise RuntimeError("anchor solution violates [H; L] e = [s; lam]: the "
                                "syndrome/observables are inconsistent with the model")
         return float(sec.w @ E), []
@@ -143,8 +142,7 @@ class Certifier:
         ell_true = pack_class(lam_bits, self.sector.powers)
         for corr in seeds:
             corr = np.asarray(corr).ravel().astype(np.int64) & 1
-            if not np.array_equal(self.sector.Hdec.astype(np.int64) @ corr % 2,
-                                  s.astype(np.int64)):
+            if not np.array_equal(hdec_mod2(self.sector, corr), s.astype(np.int64)):
                 continue                      # not a coset member: ignore
             cost, cls = _witness_eval(self.sector, s, corr, verify=True)
             if cls == ell_true:
