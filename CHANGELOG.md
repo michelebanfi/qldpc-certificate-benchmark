@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+**Joint X/Z decoding**
+- `CSSPartition`: which detectors and observables of a joint model belong to
+  the X-error and to the Z-error sector (`DecodingProblem(..., css=...)`).
+- `DecodingProblem.css_split()`: the two marginal (separate-decoding) models of
+  a joint one, exact: identical X parts merge with the probability that an odd
+  number of them fires, so each sector model has the joint model's law of its
+  syndrome and observables.
+- Joint model builders: `from_css_code_pauli(Hx, Hz, px, py, pz)` and
+  `from_css_code_depolarizing(Hx, Hz, p)` (code capacity; independent X, Y, Z
+  mechanisms solved so the Pauli channel is reproduced exactly, so the
+  marginals are exactly `from_css_code(..., px+py)` / `(..., pz+py)`), and
+  `from_css_sectors(x_sector, z_sector, mechanisms)` for any CSS circuit given
+  the two sector models and its faults as `(x_col, z_col, p)`.
+- `compare_joint_separate(problem, shots, ...)` -> `JointComparison`: certifies
+  joint ML and separate ML (each sector's marginal model on its rows of the
+  same shot; a shot fails iff either sector fails) on identical shots, with
+  both certified brackets, one-sided paired tests in both directions, and
+  decoders run jointly and/or separately (`decoder_vs_ml`).
+- `combine_sector_verdicts`: the separate-decoding verdict of a shot.
+
 ## 0.2.0
 
 **Soundness**

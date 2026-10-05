@@ -13,16 +13,133 @@ A shot draws each mechanism independently, and the decoder sees the syndrome
 ``s = H e mod 2``.  It must predict ``L e mod 2``.  This covers code-capacity
 noise (``H`` = a parity-check matrix, ``L`` = its logical operators), phenomenological
 noise, and full circuit-level noise via a Stim detector error model.
+
+Joint X/Z decoding: for a CSS code the X and Z parts of a fault are detected by
+different checks, but a ``Y`` (or a correlated two-qubit fault after a CNOT)
+flips both at once.  A *joint* model keeps such a fault as ONE mechanism with
+both signatures; *separate* decoding sees two independent faults, one per
+sector, with marginal probabilities.  :class:`CSSPartition` records which
+detectors and observables belong to each sector, :meth:`DecodingProblem.css_split`
+returns the two marginal (separate) models of a joint one, and
+:meth:`~DecodingProblem.from_css_code_pauli` /
+:meth:`~DecodingProblem.from_css_sectors` build joint models.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from scipy import sparse as _sp
 
-__all__ = ["DecodingProblem"]
+__all__ = ["DecodingProblem", "CSSPartition"]
 
 _MAX_OBSERVABLES = 62   # logical classes are packed into a signed int64
+
+
+@dataclass(frozen=True)
+class CSSPartition:
+    """Which detectors and observables belong to each CSS sector of a joint model.
+
+    The *X sector* is what separate decoding of X-type errors sees: the
+    detectors an X error can flip (Z-type checks) and the observables an X
+    error can flip.  The *Z sector* is the same for Z-type errors.  Every
+    detector and every observable must belong to exactly one sector, and each
+    sector needs at least one observable.
+
+    Index lists are stored as tuples (hashable, picklable); pass any iterables.
+    """
+    x_detectors: tuple
+    z_detectors: tuple
+    x_observables: tuple
+    z_observables: tuple
+
+    def __post_init__(self):
+        for f in ("x_detectors", "z_detectors", "x_observables", "z_observables"):
+            object.__setattr__(self, f, tuple(int(i) for i in np.asarray(
+                getattr(self, f), dtype=np.int64).ravel()))
+
+    @classmethod
+    def blocks(cls, m_x, m_z, k_x, k_z):
+        """The partition of a model whose rows are ``[X detectors; Z detectors]``
+        and observables ``[X observables; Z observables]``."""
+        return cls(range(m_x), range(m_x, m_x + m_z), range(k_x), range(k_x, k_x + k_z))
+
+    def arrays(self):
+        """``(x_detectors, z_detectors, x_observables, z_observables)`` as int64 arrays."""
+        return tuple(np.asarray(getattr(self, f), dtype=np.int64) for f in
+                     ("x_detectors", "z_detectors", "x_observables", "z_observables"))
+
+    def validate(self, num_detectors, num_observables):
+        xd, zd, xo, zo = self.arrays()
+        for name, a, b, total in (("detectors", xd, zd, num_detectors),
+                                  ("observables", xo, zo, num_observables)):
+            both = np.concatenate([a, b])
+            if both.size and (both.min() < 0 or both.max() >= total):
+                raise ValueError(f"CSSPartition: {name} index out of range [0, {total})")
+            if np.unique(both).size != both.size:
+                raise ValueError(f"CSSPartition: a {name[:-1]} is listed twice or in both "
+                                 f"sectors")
+            if both.size != total:
+                raise ValueError(f"CSSPartition: {total - both.size} {name} belong to "
+                                 f"neither sector (every one must be X or Z)")
+        if xo.size == 0 or zo.size == 0:
+            raise ValueError("CSSPartition: each sector needs at least one observable")
+
+
+def _merge_columns(H, L, priors):
+    """Merge identical ``(H; L)`` columns of independent mechanisms and drop
+    columns with no effect.  The merged column fires iff an odd number of its
+    mechanisms fire: ``1 - 2q = prod(1 - 2p)`` (exact, same law as
+    ``from_dem``'s ``p1(1-p2) + p2(1-p1)``).  First-appearance order is kept."""
+    sig = np.vstack([H, L]).astype(np.uint8)
+    cols = np.flatnonzero(sig.any(axis=0))
+    if cols.size == 0:
+        return H[:, :0], L[:, :0], np.zeros(0)
+    packed = np.packbits(sig[:, cols].T, axis=1)
+    _, first, inv = np.unique(packed, axis=0, return_index=True, return_inverse=True)
+    inv = np.asarray(inv).ravel()
+    order = np.argsort(first, kind="stable")          # groups by first appearance
+    rank = np.empty_like(order)
+    rank[order] = np.arange(order.size)
+    g = rank[inv]                                     # group index of every column
+    logs = np.zeros(order.size)
+    p = np.minimum(np.asarray(priors, dtype=np.float64)[cols], 0.5)
+    with np.errstate(divide="ignore"):
+        np.add.at(logs, g, np.log1p(-2.0 * p))
+    q = -np.expm1(logs) / 2.0
+    rep = cols[first[order]]
+    return H[:, rep], L[:, rep], q
+
+
+def _independent_pauli(px, py, pz):
+    """Probabilities ``(qx, qy, qz)`` of three INDEPENDENT X, Y, Z mechanisms
+    whose combined effect is exactly the Pauli channel ``(px, py, pz)``.
+
+    On one qubit the mechanisms multiply, so in Fourier (commutation)
+    coordinates ``(1-2qy)(1-2qz) = 1-2(py+pz)`` and cyclically; solving gives
+    ``1 - 2qx = sqrt(fY fZ / fX)`` with ``fX = 1-2(py+pz)``, etc.  Depolarizing
+    noise ``px = py = pz = p/3`` gives ``q = (1 - sqrt(1 - 4p/3)) / 2``.
+
+    Such ``q >= 0`` exist iff ``px (1 - p) >= py pz`` and cyclically, with
+    ``p = px + py + pz`` (two independent flips combine into the third Pauli,
+    so a channel with a rare Pauli and two common ones is not a product)."""
+    px, py, pz = (np.asarray(v, dtype=np.float64) for v in (px, py, pz))
+    if (px < 0).any() or (py < 0).any() or (pz < 0).any():
+        raise ValueError("Pauli probabilities must be non-negative")
+    fX, fY, fZ = 1 - 2 * (py + pz), 1 - 2 * (px + pz), 1 - 2 * (px + py)
+    if (fX <= 0).any() or (fY <= 0).any() or (fZ <= 0).any():
+        raise ValueError("every marginal flip probability (px+py, pz+py, px+pz) must "
+                         "be < 1/2")
+    A = np.sqrt(fY * fZ / fX)
+    B = np.sqrt(fX * fZ / fY)
+    C = np.sqrt(fX * fY / fZ)
+    if (A > 1 + 1e-12).any() or (B > 1 + 1e-12).any() or (C > 1 + 1e-12).any():
+        raise ValueError("this Pauli channel is not a product of independent X, Y and "
+                         "Z flips: it needs px(1-p) >= py*pz and cyclically "
+                         "(p = px+py+pz); build the joint model with from_css_sectors "
+                         "instead")
+    return tuple(np.clip((1 - v) / 2, 0.0, 0.5) for v in (A, B, C))
 
 
 def _as_dense_binary(M, name):
@@ -53,6 +170,9 @@ class DecodingProblem:
         columns (code-capacity noise).
     name : str, optional
         Label used in reports.
+    css : CSSPartition, optional
+        For a joint X/Z model: which detectors and observables belong to each
+        CSS sector (enables :meth:`css_split`).  The joint constructors set it.
 
     Notes
     -----
@@ -63,7 +183,8 @@ class DecodingProblem:
     about that column.
     """
 
-    def __init__(self, check_matrix, logical_matrix, priors, name: str = "problem"):
+    def __init__(self, check_matrix, logical_matrix, priors, name: str = "problem",
+                 css: CSSPartition = None):
         H = _as_dense_binary(check_matrix, "check_matrix")
         L = _as_dense_binary(logical_matrix, "logical_matrix")
         m, n = H.shape
@@ -100,10 +221,16 @@ class DecodingProblem:
         # weight is finite (it is clipped to 50 nats anyway).
         pri = np.where(pri <= 0.0, 1e-300, pri)
 
+        if css is not None:
+            if not isinstance(css, CSSPartition):
+                raise TypeError(f"css must be a CSSPartition, got {type(css)}")
+            css.validate(m, k)
+
         self.H = H
         self.L = L
         self.priors = pri
         self.name = str(name)
+        self.css = css
         self._H_csr = None
         self._L_csr = None
 
@@ -241,6 +368,137 @@ class DecodingProblem:
         dem = circuit.detector_error_model(decompose_errors=False,
                                            approximate_disjoint_errors=True)
         return cls.from_dem(dem, merge_duplicates=merge_duplicates, name=name)
+
+    @classmethod
+    def from_css_sectors(cls, x_sector, z_sector, mechanisms, name: str = "joint"):
+        """Joint X/Z model from the two sector models and the correlated faults.
+
+        ``x_sector`` / ``z_sector`` are the models separate decoding uses: a
+        :class:`DecodingProblem` (only ``H`` and ``L`` are read) whose columns
+        are the X parts (resp. Z parts) a fault can have.  ``mechanisms`` lists
+        every elementary fault as ``(x_col, z_col, p)``: the column of its X
+        part in ``x_sector`` and of its Z part in ``z_sector`` (``-1`` for no
+        part), and its independent firing probability.
+
+        A Clifford CSS circuit propagates the X and Z parts of a Pauli fault
+        independently, so the fault's joint signature is the pair of its two
+        sector columns.  Rows are ``[X-sector detectors; Z-sector detectors]``
+        and ``[X-sector observables; Z-sector observables]`` (the
+        :class:`CSSPartition` is set).  Faults with the same signature are
+        merged exactly (an odd number of them fires).  :meth:`css_split` of the
+        result returns the marginal sector models implied by ``mechanisms``.
+        """
+        mech = np.asarray(mechanisms, dtype=np.float64)
+        if mech.ndim != 2 or mech.shape[1] != 3:
+            raise ValueError("mechanisms must be a sequence of (x_col, z_col, p)")
+        xs = mech[:, 0].astype(np.int64)
+        zs = mech[:, 1].astype(np.int64)
+        p = mech[:, 2]
+        if not np.array_equal(xs, mech[:, 0]) or not np.array_equal(zs, mech[:, 1]):
+            raise ValueError("x_col / z_col must be integers")
+        nx, nz = x_sector.num_mechanisms, z_sector.num_mechanisms
+        if (xs < -1).any() or (xs >= nx).any() or (zs < -1).any() or (zs >= nz).any():
+            raise ValueError("a mechanism refers to a sector column out of range "
+                             "(use -1 for no part)")
+        if not np.all(np.isfinite(p)) or (p < 0).any() or (p >= 0.5).any():
+            raise ValueError("mechanism probabilities must lie in [0, 0.5)")
+        mx, mz = x_sector.num_detectors, z_sector.num_detectors
+        kx, kz = x_sector.num_observables, z_sector.num_observables
+        M = xs.size
+        H = np.zeros((mx + mz, M), dtype=np.uint8)
+        L = np.zeros((kx + kz, M), dtype=np.uint8)
+        hx, hz = xs >= 0, zs >= 0
+        H[:mx, hx] = x_sector.H[:, xs[hx]]
+        L[:kx, hx] = x_sector.L[:, xs[hx]]
+        H[mx:, hz] = z_sector.H[:, zs[hz]]
+        L[kx:, hz] = z_sector.L[:, zs[hz]]
+        H, L, q = _merge_columns(H, L, p)
+        if q.size == 0:
+            raise ValueError("no mechanism has any effect")
+        return cls(H, L, q, name=name, css=CSSPartition.blocks(mx, mz, kx, kz))
+
+    @classmethod
+    def from_css_code_pauli(cls, Hx, Hz, px, py, pz, name: str = "css_pauli"):
+        """Joint code-capacity model of a CSS code under the Pauli channel
+        ``(px, py, pz)`` (scalars or per-qubit arrays).
+
+        Each qubit carries three independent mechanisms, X, Y and Z, with
+        probabilities chosen so that their combined effect is EXACTLY the
+        channel (not its first-order approximation).  This needs
+        ``px (1 - p) >= py pz`` and cyclically (``p = px + py + pz``): true for
+        depolarizing and moderately biased noise.  The two marginal models,
+        ``css_split()``, are then exactly ``from_css_code(Hx, Hz, px + py, "X")``
+        and ``from_css_code(Hx, Hz, pz + py, "Z")``: what separate decoding uses.
+        """
+        from .codes import css_logicals
+        Hx = _as_dense_binary(Hx, "Hx")
+        Hz = _as_dense_binary(Hz, "Hz")
+        if Hx.shape[1] != Hz.shape[1]:
+            raise ValueError("Hx and Hz must have the same number of columns")
+        if (Hx.astype(np.int64) @ Hz.T.astype(np.int64) % 2).any():
+            raise ValueError("Hx Hz^T != 0 mod 2: not a valid CSS code")
+        Lx, Lz = css_logicals(Hx, Hz)
+        if Lx.shape[0] == 0:
+            raise ValueError("the code encodes no logical qubits (k = 0)")
+        if 2 * Lx.shape[0] > _MAX_OBSERVABLES:
+            raise ValueError(f"a joint model has 2k = {2 * Lx.shape[0]} observables; "
+                             f"at most {_MAX_OBSERVABLES} are supported")
+        n = Hx.shape[1]
+        qx, qy, qz = (np.broadcast_to(v, (n,)) for v in _independent_pauli(px, py, pz))
+        x_sector = cls(Hz, Lz, 0.25, name=f"{name}:X")    # priors unused here
+        z_sector = cls(Hx, Lx, 0.25, name=f"{name}:Z")
+        qubits = np.arange(n)
+        none = np.full(n, -1)
+        mech = np.concatenate([
+            np.column_stack([qubits, none, qx]),       # X on qubit q
+            np.column_stack([none, qubits, qz]),       # Z on qubit q
+            np.column_stack([qubits, qubits, qy]),     # Y on qubit q: both parts
+        ])
+        return cls.from_css_sectors(x_sector, z_sector, mech, name=name)
+
+    @classmethod
+    def from_css_code_depolarizing(cls, Hx, Hz, p, name: str = "css_depolarizing"):
+        """Joint code-capacity model under depolarizing noise: X, Y, Z each with
+        probability ``p/3`` (exactly).  Separate decoding of the same noise is
+        ``from_css_code(Hx, Hz, 2p/3, ...)`` per sector, which is what
+        ``css_split()`` returns."""
+        p = np.asarray(p, dtype=np.float64)
+        return cls.from_css_code_pauli(Hx, Hz, p / 3, p / 3, p / 3, name=name)
+
+    def css_split(self, partition: CSSPartition = None):
+        """The two marginal (separate-decoding) models of a joint X/Z model.
+
+        Returns ``(x_problem, z_problem)``.  The X-sector model keeps only the
+        X-sector detector and observable rows; its columns are the distinct X
+        parts of the joint mechanisms, each with the exact probability that an
+        odd number of the mechanisms sharing it fires.  Because the joint
+        mechanisms are independent, so are these, and the X-sector model has
+        exactly the joint model's marginal law of (X syndrome, X observables).
+        Separate decoding certifies each sector on the matching rows of a joint
+        shot: ``syndrome[x_detectors]`` and ``observables[x_observables]``.
+
+        ``partition`` defaults to :attr:`css` (set by the joint constructors);
+        pass one for a joint model built otherwise, e.g. from a Stim circuit.
+        """
+        part = self.css if partition is None else partition
+        if part is None:
+            raise ValueError("this problem has no CSSPartition: pass "
+                             "partition=CSSPartition(x_detectors, z_detectors, "
+                             "x_observables, z_observables)")
+        part.validate(self.num_detectors, self.num_observables)
+        xd, zd, xo, zo = part.arrays()
+        out = []
+        for tag, det, obs in (("X", xd, xo), ("Z", zd, zo)):
+            H, L, q = _merge_columns(self.H[det], self.L[obs], self.priors)
+            if q.size == 0:
+                raise ValueError(f"no mechanism acts on the {tag} sector")
+            try:
+                out.append(DecodingProblem(H, L, q, name=f"{self.name}:{tag}"))
+            except ValueError as e:
+                raise ValueError(f"{tag} sector of the split: {e} -- check that the "
+                                 f"partition assigns every observable to the sector "
+                                 f"whose detectors see it") from e
+        return tuple(out)
 
     # ------------------------------------------------------------ utilities
     def _csr(self):

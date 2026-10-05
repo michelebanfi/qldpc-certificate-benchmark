@@ -289,6 +289,60 @@ fixed-size runs, so leave `target_failures` unset for runs you pool.
 and overlapping bands. `qcb.clopper_pearson_lower/upper` expose the one-sided
 limits directly.
 
+## Joint X/Z decoding
+
+For a CSS code, decoders usually treat the X-error and Z-error sectors as two
+independent problems, each with the *marginal* noise of its sector. A `Y`, or a
+correlated two-qubit fault after a CNOT, is then priced as two independent
+faults, although it is one event. A **joint** model keeps such a fault as one
+mechanism that flips detectors of both sectors. The certificate runs on it
+unchanged (it is just a problem with `2k` observables), so you can certify
+joint ML and separate ML **on the same shots** and compare them:
+
+```python
+Hx, Hz, Lx, Lz = qcb.codes.bb_72_12_6()
+
+# depolarizing noise: X, Y, Z with probability p/3 each (exactly)
+joint = qcb.DecodingProblem.from_css_code_depolarizing(Hx, Hz, p=0.06)
+x_model, z_model = joint.css_split()   # what separate decoding uses:
+                                       # from_css_code(Hx, Hz, 2p/3, "X") / "Z"
+
+mine = qcb.BPOSD(osd_method="osd0", name="bp+osd0", role="probe")
+cmp = qcb.compare_joint_separate(joint, shots=2000,
+                                 joint_decoders=[mine],     # on the joint model
+                                 separate_decoders=[mine])  # once per sector
+print(cmp)                  # both certified ML brackets, the paired test,
+cmp.ml_brackets()           # and every decoder used jointly and separately
+cmp.paired_test()           # {'joint_better': {...}, 'separate_better': {...}}
+cmp.decoder_vs_ml("bp+osd0", mode="joint", ml="separate")  # beats separate ML?
+```
+
+A shot is a separate-ML failure iff either sector fails. The paired tests are
+one-sided and resolve uncertified shots against the claim being tested. The
+bracket seeders (`seeders="auto"`: BP+OSD, and Tesseract when installed) run on
+all three problems and are reported in both modes too. A separate decoder is
+set up once per sector, so pass built-in names, `Decoder` objects or
+`FunctionDecoder(factory=...)`: a bare function cannot tell the sectors apart.
+
+Building joint models:
+
+| constructor | noise |
+|---|---|
+| `from_css_code_pauli(Hx, Hz, px, py, pz)` | code-capacity Pauli channel; independent X, Y, Z mechanisms with probabilities solved so that the channel is reproduced exactly (needs `px(1-p) >= py*pz` and cyclically) |
+| `from_css_code_depolarizing(Hx, Hz, p)` | the same with `px = py = pz = p/3` |
+| `from_css_sectors(x_sector, z_sector, mechanisms)` | any CSS circuit: the two sector models plus every elementary fault as `(x_col, z_col, p)`, the columns of its X and Z parts (`-1` for none) |
+| `DecodingProblem(H, L, priors, css=CSSPartition(...))` | a joint model you already have, e.g. a Stim circuit DEM |
+
+`CSSPartition` records which detectors and observables belong to each sector;
+the constructors above set it. `css_split()` returns the two marginal models,
+whose columns are the distinct X (Z) parts of the joint mechanisms with the
+exact probability that an odd number of them fires. Each has exactly the joint
+model's law of its sector's syndrome and observables.
+
+With uniform priors (code-capacity depolarizing noise) many solutions tie
+exactly, which widens both brackets; circuit-level or non-uniform priors rarely
+tie.
+
 ## Performance knobs
 
 ```python

@@ -18,13 +18,14 @@ Quick start::
 
 from ._version import __version__
 from .config import CertConfig
-from .problem import DecodingProblem
+from .problem import DecodingProblem, CSSPartition
 from .certifier import Certifier, Certificate, ROUTES
 from .decoders import (Role, Decoder, FunctionDecoder, BPOSD, Tesseract, Simplex,
                        has_tesseract)
 from .benchmark import benchmark, certify_shots
 from .results import (BenchmarkResult, clopper_pearson, clopper_pearson_lower,
                       clopper_pearson_upper, population_bracket)
+from .joint import compare_joint_separate, JointComparison, combine_sector_verdicts
 from . import codes
 
 
@@ -41,4 +42,6 @@ __all__ = [
     "Simplex", "has_tesseract", "benchmark", "certify_shots", "BenchmarkResult",
     "clopper_pearson", "clopper_pearson_lower", "clopper_pearson_upper",
     "population_bracket", "ROUTES", "codes", "selftest",
+    "CSSPartition", "compare_joint_separate", "JointComparison",
+    "combine_sector_verdicts",
 ]
