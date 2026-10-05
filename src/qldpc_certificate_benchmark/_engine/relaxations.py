@@ -21,6 +21,13 @@ from scipy.sparse import csr_matrix, eye as _speye, hstack as _sp_hstack, vstack
 
 from .constants import ST_MIN, ST_PROVED, ST_BUDGET
 
+# A status-0 MIP whose dual bound trails the primal by more than this is treated
+# as unproved (see _ilp_exact).  Float round-off alone leaves ~1e-15; 1e-10 is 10x
+# below EPS_TIE, so an optimum overstated by at most this much still leaves
+# every strict EPS_TIE-margin verdict true.
+_GAP_TOL = 1e-10
+
+
 def _lp_root_bound(H_aug, row_active, b, w):
     """LP-relaxation lower bound on min{w^T x : A x = b (mod 2), x in {0,1}^n}.
 
@@ -140,11 +147,18 @@ def _milp_lower_bound(H_aug, row_active, b, w, time_limit=2.0,
                 ub=np.concatenate([np.ones(n), max_z]),
             ),
             integrality=integrality,
-            options={"time_limit": float(time_limit)},
+            # HiGHS otherwise stops at a 1e-4 RELATIVE gap and still reports
+            # status 0; res.fun is then an upper bound, not the minimum.
+            options={"time_limit": float(time_limit), "mip_rel_gap": 0.0},
         )
     except Exception:
         return 0.0, False
     if res.status == 0:                 # proved optimal
+        # the proved bound is the dual bound; it equals res.fun when HiGHS
+        # closed the gap exactly (the normal case) and is the safe side if not
+        db = getattr(res, "mip_dual_bound", None)
+        if db is not None and np.isfinite(db) and db < float(res.fun) - _GAP_TOL:
+            return float(db), False
         return float(res.fun), True
     if res.status == 2:                 # infeasible -> empty coset
         return np.inf, True
@@ -317,7 +331,9 @@ def _ilp_exact(H_aug, row_active, b, w, time_limit=2.0,
             bounds=_Bounds(lb=np.zeros(n + R),
                            ub=np.concatenate([np.ones(n), max_z])),
             integrality=integrality,
-            options={"time_limit": float(time_limit)})
+            # exact gap: at HiGHS's default 1e-4 relative gap, status 0 would
+            # not mean the incumbent is the minimum (see _milp_lower_bound)
+            options={"time_limit": float(time_limit), "mip_rel_gap": 0.0})
     except Exception:
         return ST_BUDGET, np.inf, 0.0, None
     if res.status == 2:                    # infeasible -> empty coset
@@ -331,9 +347,14 @@ def _ilp_exact(H_aug, row_active, b, w, time_limit=2.0,
             ub_val = float(w_eff @ xb)
             if keep is not None:
                 witness = keep[witness]
+    db = getattr(res, "mip_dual_bound", None)
     if res.status == 0:                    # proved optimal
+        if db is not None and np.isfinite(db) and db < float(res.fun) - _GAP_TOL:
+            # "optimal" only up to HiGHS's absolute gap tolerance: keep what is
+            # proved -- the dual lower bound and the verified incumbent
+            return ST_BUDGET, ub_val, float(db), witness
         return ST_MIN, float(res.fun), float(res.fun), witness
-    db = getattr(res, "mip_dual_bound", None)   # time/iteration limit hit
+    # time/iteration limit hit
     lb = float(db) if (db is not None and np.isfinite(db)) else 0.0
     return ST_BUDGET, ub_val, lb, witness
 

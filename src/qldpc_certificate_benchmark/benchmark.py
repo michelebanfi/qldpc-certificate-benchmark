@@ -189,7 +189,7 @@ def _do_shot(i):
 
 
 def _run(problem, decs, cfg, syn, obs, num_workers, target_failures, stop_on,
-         progress, mp_context, meta):
+         progress, mp_context, meta, fault_counts=None):
     shots = len(syn)
     if num_workers is None:
         num_workers = cpu_count()
@@ -236,16 +236,19 @@ def _run(problem, decs, cfg, syn, obs, num_workers, target_failures, stop_on,
     if progress:
         sys.stderr.write("\n")
     n_done = next((j for j, r in enumerate(rows) if r is None), shots)
+    meta["stopped_early"] = n_done < shots
     return BenchmarkResult.from_rows(
         rows[:n_done], decoders=[(d.name, d.role.value) for d in decs],
-        problem=problem, config=cfg, elapsed=time.time() - t0, meta=meta)
+        problem=problem, config=cfg, elapsed=time.time() - t0, meta=meta,
+        fault_counts=None if fault_counts is None else fault_counts[:n_done])
 
 
 # ------------------------------------------------------------------ public API
 def benchmark(problem, decoders=None, shots: int = 1000, *, seed=0,
               seeders="auto", crosscheck=False, config: CertConfig = DEFAULT_CFG,
               num_workers=None, target_failures=None, stop_on=None,
-              progress: bool = True, mp_context=None) -> BenchmarkResult:
+              progress: bool = True, mp_context=None,
+              fault_band=None) -> BenchmarkResult:
     """Sample shots from ``problem``, decode them, and certify ML on every shot.
 
     Parameters
@@ -278,12 +281,24 @@ def benchmark(problem, decoders=None, shots: int = 1000, *, seed=0,
         Multiprocessing start method.  By default ``"fork"`` is used when this
         process is single-threaded, and ``"forkserver"`` otherwise (forking a
         multi-threaded process can deadlock the LP solver).
+    fault_band : (lo, hi), optional
+        Rare-event mode: sample only shots whose number of fired mechanisms
+        ``K`` lies in ``[lo, hi]`` (exactly the prior law conditioned on that
+        event).  Put the band where ML failures live (well above the mean of
+        ``K``) and combine the run with plain runs in
+        :func:`population_bracket`.  Keep ``target_failures`` unset: the
+        Clopper-Pearson bounds assume a fixed number of shots.
     """
-    syn, obs = problem.sample(shots, seed=seed)
+    syn, obs, K = problem.sample(shots, seed=seed, fault_band=fault_band,
+                                 return_fault_counts=True)
     decs = _build_decoder_list(decoders, seeders, crosscheck)
-    meta = {"mode": "benchmark", "seed": seed, "shots_requested": shots}
+    meta = {"mode": "benchmark", "seed": seed, "shots_requested": shots,
+            "target_failures": target_failures}
+    if fault_band is not None:
+        lo, hi = (int(x) for x in fault_band)
+        meta.update(fault_band=[lo, hi], band_mass=problem.band_mass(lo, hi))
     return _run(problem, decs, config, syn, obs, num_workers, target_failures,
-                stop_on, progress, mp_context, meta)
+                stop_on, progress, mp_context, meta, fault_counts=K)
 
 
 def certify_shots(problem, syndromes, observables, predictions=None, *,

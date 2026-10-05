@@ -10,6 +10,8 @@ Soundness constants (``EPS_TIE``, ``MAX_DEPTH``, the slacks) are not knobs.
 They live in ``qldpc_certificate_benchmark._engine.constants``.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, asdict, replace
 
 
@@ -22,6 +24,15 @@ class CertConfig:
     # decoder under test.
     anchor_bp_iters: int = 3
     anchor_bp_schedule: str = "serial"          # "serial" | "parallel"
+
+    # --- cheap first pass ----------------------------------------------------
+    # Before the anchor and the 1-true + k-wrong decomposition, try the unified
+    # single-coset search with NO true-class cap (budget
+    # ``unified_node_budget``).  Exact: the kernel tightens the cap to the
+    # global minimum at its first goal.  It decides most shots in a few ms (vs
+    # ~100 ms for the decomposition on [[144,12,12]] circuit noise); when it is
+    # inconclusive the full certificate runs as before.
+    use_fast_pass: bool = True
 
     # --- certified A* search budgets (nodes) --------------------------------
     true_node_budget: int = 50_000
@@ -36,6 +47,18 @@ class CertConfig:
     escalate: bool = True
     escalate_factor: int = 10
     esc_margin: float = 8.0
+
+    # --- last resorts for shots the full certificate left undecided -------
+    # ``fast_retry_node_budget``: re-run the cap-free unified search with this
+    # many nodes (``pool_cap`` must be ~10-20x larger: pushes outnumber
+    # expansions).  ``None`` disables it.
+    fast_retry_node_budget: int | None = None
+    # ``use_global_route``: exact global ILPs -- a syndrome-only ILP witness,
+    # then one infeasibility proof that no competing class costs <= its cost +
+    # margin (margins 0.1 .. 1e-6).  No MIP optimality claim is trusted.
+    # Expensive (~1-2 min per hard d=12 sector), so off by default.
+    use_global_route: bool = False
+    global_time_limit: float = 60.0
 
     # --- bracket-tightening layers (all admissible / re-verified) -----------
     use_lp_screen: bool = True
@@ -72,7 +95,11 @@ class CertConfig:
             raise ValueError(f"escalate_factor must be >= 1, got {self.escalate_factor!r}")
         if self.esc_margin < 0:
             raise ValueError(f"esc_margin must be >= 0, got {self.esc_margin!r}")
-        if self.milp_time_limit <= 0 or self.exact_ilp_time_limit <= 0:
+        if self.fast_retry_node_budget is not None and self.fast_retry_node_budget <= 0:
+            raise ValueError(f"fast_retry_node_budget must be positive or None, "
+                             f"got {self.fast_retry_node_budget!r}")
+        if (self.milp_time_limit <= 0 or self.exact_ilp_time_limit <= 0
+                or self.global_time_limit <= 0):
             raise ValueError("solver time limits must be positive")
 
     def to_dict(self) -> dict:

@@ -261,17 +261,61 @@ class DecodingProblem:
         e = np.asarray(errors)
         return (np.asarray(Lc @ e.T).T % 2).astype(np.uint8)
 
-    def sample(self, shots: int, seed=None, return_errors: bool = False):
+    @property
+    def fingerprint(self) -> str:
+        """Short hash of ``(H, L, priors)``: results pool only on equal problems."""
+        import hashlib
+        h = hashlib.sha1(np.ascontiguousarray(self.H).tobytes())
+        h.update(np.ascontiguousarray(self.L).tobytes())
+        h.update(np.ascontiguousarray(self.priors).tobytes())
+        h.update(repr((self.H.shape, self.L.shape)).encode())
+        return h.hexdigest()[:16]
+
+    def fault_count_pmf(self, hi: int):
+        """Exact ``P(K = c)``, ``c = 0..hi``, for ``K`` = number of fired mechanisms."""
+        from ._sampling import fault_count_pmf
+        return fault_count_pmf(self.priors, hi)
+
+    def band_mass(self, lo: int, hi: int) -> float:
+        """Exact ``P(lo <= K <= hi)`` under the priors."""
+        lo, hi = int(lo), int(hi)
+        if not 0 <= lo <= hi <= self.num_mechanisms:
+            raise ValueError(f"need 0 <= lo <= hi <= {self.num_mechanisms}, "
+                             f"got [{lo}, {hi}]")
+        return float(min(1.0, self.fault_count_pmf(hi)[lo:].sum()))
+
+    def sample(self, shots: int, seed=None, return_errors: bool = False,
+               fault_band=None, return_fault_counts: bool = False):
         """Draw ``shots`` independent shots from the priors.
 
         Returns ``(syndromes, observables)`` as uint8 arrays of shape
-        ``(shots, m)`` and ``(shots, k)``, plus ``errors`` (shots, n) when
-        ``return_errors`` is set.  Deterministic given ``seed``.
+        ``(shots, m)`` and ``(shots, k)``, then ``errors`` (shots, n) when
+        ``return_errors`` is set, then the fault counts ``K`` (shots,) when
+        ``return_fault_counts`` is set.  Deterministic given ``seed``.
+
+        ``fault_band=(lo, hi)`` samples from the priors *conditioned on*
+        ``lo <= K <= hi`` (exactly; see :meth:`band_mass`).  Certified failures
+        of such shots give a population lower bound through
+        :func:`population_bracket`.
         """
+        if fault_band is not None:
+            syn, obs, errs, K = self._sample_band(shots, seed, fault_band,
+                                                  return_errors)
+        else:
+            syn, obs, errs, K = self._sample_plain(shots, seed, return_errors)
+        out = (syn, obs)
+        if return_errors:
+            out += (errs,)
+        if return_fault_counts:
+            out += (K,)
+        return out
+
+    def _sample_plain(self, shots, seed, return_errors):
         rng = np.random.default_rng(seed)
         n = self.num_mechanisms
         syn = np.empty((shots, self.num_detectors), dtype=np.uint8)
         obs = np.empty((shots, self.num_observables), dtype=np.uint8)
+        K = np.empty(shots, dtype=np.int64)
         errs = np.empty((shots, n), dtype=np.uint8) if return_errors else None
         chunk = max(1, min(shots, 4_000_000 // max(n, 1)))
         for a in range(0, shots, chunk):
@@ -279,8 +323,21 @@ class DecodingProblem:
             e = (rng.random((b - a, n)) < self.priors).astype(np.uint8)
             syn[a:b] = self.syndrome(e)
             obs[a:b] = self.observables(e)
+            K[a:b] = e.sum(axis=1)
             if return_errors:
                 errs[a:b] = e
-        if return_errors:
-            return syn, obs, errs
-        return syn, obs
+        return syn, obs, errs, K
+
+    def _sample_band(self, shots, seed, band, return_errors):
+        from ._sampling import sample_fault_band
+        lo, hi = (int(x) for x in band)
+        # one 63-bit seed for the numba RNG, derived reproducibly from ``seed``
+        s63 = int(np.random.default_rng(seed).integers(0, 2**63 - 1))
+        ptr, idx, K = sample_fault_band(self.priors, lo, hi, shots, s63)
+        E = _sp.csr_matrix((np.ones(idx.size, dtype=np.int64), idx, ptr),
+                           shape=(shots, self.num_mechanisms))
+        Hc, Lc = self._csr()
+        syn = (np.asarray((E @ Hc.T).todense()) % 2).astype(np.uint8)
+        obs = (np.asarray((E @ Lc.T).todense()) % 2).astype(np.uint8)
+        errs = E.toarray().astype(np.uint8) if return_errors else None
+        return syn, obs, errs, K

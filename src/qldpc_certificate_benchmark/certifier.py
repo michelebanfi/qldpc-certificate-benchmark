@@ -33,10 +33,14 @@ from .decoders import Role, as_decoder
 from ._engine.constants import V_SUCCESS, V_FAIL, V_TIE, V_BUDGET
 from ._engine.sector import make_sector, pack_class, _witness_eval, hdec_mod2, haug_mod2
 from ._engine.verdicts import certify_sector
+from ._engine.fastcert import fast_unified, global_route
 
-__all__ = ["Certifier", "Certificate", "VERDICTS"]
+__all__ = ["Certifier", "Certificate", "VERDICTS", "ROUTES"]
 
 VERDICTS = ("success", "fail", "tie", "undecided")
+# Which stage produced the verdict: the cap-free unified pass, the anchored
+# full certificate, the large-budget cap-free retry, or the global ILP route.
+ROUTES = ("fast", "full", "fast_retry", "global")
 
 
 @dataclass
@@ -60,6 +64,11 @@ class Certificate:
     def ml_correct(self):
         """True / False when proven, None when tie or undecided."""
         return {"success": True, "fail": False}.get(self.verdict)
+
+    @property
+    def route(self) -> str:
+        """The stage that decided the shot (see :data:`ROUTES`)."""
+        return self.details.get("route", "full")
 
     @property
     def code(self) -> int:
@@ -108,10 +117,7 @@ class Certifier:
             longer independently benchmarked.
         """
         s, lam_bits = self._prep(syndrome, observables)
-        cap_true, seed_wrong = self._anchor(s, lam_bits)
-        cap_true, seed_wrong = self._fold_seeds(s, lam_bits, cap_true, seed_wrong,
-                                                seeds or ())
-        return self._to_certificate(self._run(s, lam_bits, cap_true, seed_wrong))
+        return self._to_certificate(self._run(s, lam_bits, seeds or ()))
 
     # ------------------------------------------------------------ internals
     def _prep(self, syndrome, observables):
@@ -151,9 +157,21 @@ class Certifier:
                 seed_wrong.append(corr)
         return cap_true, seed_wrong
 
-    def _run(self, s, lam_bits, cap_true, seed_wrong):
-        cfg = self.cfg
-        cert = certify_sector(self.sector, s, lam_bits, cap_true,
+    def _run(self, s, lam_bits, seeds):
+        """Fast pass -> anchored full certificate (+ escalation) -> last resorts.
+
+        Every stage is exact on its own, so the order only affects speed:
+        ``route`` records which stage decided the shot."""
+        cfg, sec = self.cfg, self.sector
+        if cfg.use_fast_pass:
+            out = fast_unified(sec, s, lam_bits, cfg.unified_node_budget)
+            if out is not None:
+                out["escalations"] = 0
+                return out
+        cap_true, seed_wrong = self._anchor(s, lam_bits)
+        cap_true, seed_wrong = self._fold_seeds(s, lam_bits, cap_true, seed_wrong,
+                                                seeds)
+        cert = certify_sector(sec, s, lam_bits, cap_true,
                               seed_wrong=seed_wrong, cfg=cfg)
         cert["escalations"] = 0
         if cfg.escalate and cert["verdict"] == V_BUDGET:
@@ -161,11 +179,26 @@ class Certifier:
             close_fail = (not cert["true_exact"]
                           and cert["ub_wrong"] - cert["lb_true"] <= cfg.esc_margin)
             if close_success or close_fail:
-                cert = certify_sector(self.sector, s, lam_bits, cap_true,
+                cert = certify_sector(sec, s, lam_bits, cap_true,
                                       budget_scale=cfg.escalate_factor,
                                       seed_wrong=seed_wrong, cfg=cfg)
                 cert["escalations"] = 1
-        return cert
+        cert.setdefault("route", "full")
+        if cert["verdict"] != V_BUDGET:
+            return cert
+        nodes, esc = int(cert["nodes_total"]), cert["escalations"]
+        out = None
+        if cfg.fast_retry_node_budget:
+            out = fast_unified(sec, s, lam_bits, cfg.fast_retry_node_budget)
+            if out is not None:
+                out["route"] = "fast_retry"
+        if out is None and cfg.use_global_route:
+            out = global_route(sec, s, lam_bits, cfg.global_time_limit)
+        if out is None:
+            return cert
+        out["nodes_total"] = nodes + int(out["nodes_total"])
+        out["escalations"] = esc
+        return out
 
     @staticmethod
     def _to_certificate(cert):
@@ -183,17 +216,16 @@ class Certifier:
         independence: the seed loop iterates only SEED specs)."""
         sec = self.sector
         ell_true = pack_class(lam_bits, sec.powers)
-        cap_true, seed_wrong = self._anchor(s, lam_bits)
         results = {d.name: d._run(sec, s, shot_idx) for d in decoders}
         seeds = [results[d.name].correction for d in decoders
                  if d.role is Role.SEED and results[d.name].correction is not None]
-        cap_true, seed_wrong = self._fold_seeds(s, lam_bits, cap_true, seed_wrong, seeds)
-        cert = self._run(s, lam_bits, cap_true, seed_wrong)
+        cert = self._run(s, lam_bits, seeds)
         out = {
             "verdict": int(cert["verdict"]),
             "nodes": int(cert["nodes_total"]),
             "escalated": bool(cert["escalations"]),
             "clustered": bool(cert.get("clustered", False)),
+            "route": ROUTES.index(cert.get("route", "full")),
             "lb_true": float(cert["lb_true"]), "ub_true": float(cert["ub_true"]),
             "lb_wrong": float(cert["lb_wrong"]), "ub_wrong": float(cert["ub_wrong"]),
         }

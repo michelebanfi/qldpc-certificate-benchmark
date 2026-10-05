@@ -163,8 +163,10 @@ solution in every wrong class:
 | `undecided` | the search budget ran out before a proof was found                       |
 
 Over `N` shots, `#fail/N ≤ LER_ML ≤ (#fail + #tie + #undecided)/N` holds
-**exactly** on the sampled shots. `result.ml_bracket()` also widens the
-bracket with one-sided Clopper-Pearson intervals to cover sampling error.
+**exactly** on the sampled shots. `result.ml_bracket()` also gives a bracket
+on the *population* ML LER, `[lb_ci, ub_ci]`, which holds jointly with 95%
+confidence: exact one-sided Clopper-Pearson limits at 2.5% each. For rates too
+small to see with plain sampling, see [Rare events](#rare-events-fault-count-bands).
 
 This is *non-degenerate* ML: the most likely single error pattern, which is
 the target of minimum-weight / MLE decoders such as Tesseract and exact ILP
@@ -174,20 +176,27 @@ Code-capacity models with *uniform* priors have many exactly-degenerate
 minima and therefore many `tie`s. Circuit-level DEMs, whose priors are not
 uniform, rarely produce them.
 
-**How it is proven.** Each shot runs an exact A* search over the coset with
+**How it is proven.** Each shot first tries a cheap pass: one unified A*
+search over the whole syndrome coset with no true-class cap. The first goal it
+pops is the exact global minimum, and it stops once every unseen solution is
+provably above it. This settles most shots in a few milliseconds. The shots it
+leaves open go to the full certificate: an exact A* search over each coset with
 admissible heuristics, strengthened by a covering-LP dual bound, adaptive
 parity-cut LPs (Feldman), and exact integer programs (HiGHS). A certified
 cluster decomposition splits shots with independent error regions. Every
 witness produced by an LP/ILP solver or a seeding decoder is re-verified in
 NumPy before it can enter a proof, so a solver bug or a wrong decoder can
-make a shot `undecided` but never flip a verdict. The engine is validated
+make a shot `undecided` but never flip a verdict. Every MIP runs at an exact
+gap (`mip_rel_gap=0`), and its lower bound is read from HiGHS's dual bound. The
+engine is validated
 against exhaustive enumeration by `qcb.selftest()`. The kernels are compiled
 without `fastmath`, so the strict comparisons keep IEEE semantics.
 
 ## Reading the results
 
 ```python
-result.ml_bracket()        # {'lb', 'ub', 'lb_ci', 'ub_ci', 'uncertified_frac'}
+result.ml_bracket()        # {'lb', 'ub', 'lb_ci', 'ub_ci', 'confidence', ...}
+                           # lb_ci/ub_ci: joint 95% population bracket
 result.ler("mine")         # LER, failures, shots, Clopper-Pearson CI
 result.decomposition("mine")
 #   intrinsic   -- ML also provably fails: no decoder could fix these
@@ -198,6 +207,7 @@ result.gap_to_ml("mine")   # one-sided exact McNemar vs ML; uncertified shots ar
                            # resolved AGAINST the claim, so p is certified
 result.compare("mine", "bp_osd")  # paired exact McNemar between two decoders
 result.summary()           # everything as a dict
+result.route_counts()      # which certifier stage decided each shot
 result.save("run1")        # run1.json (summary) + run1.npz (per-shot arrays)
 ```
 
@@ -248,6 +258,37 @@ class MyDecoder(qcb.Decoder):
 A correction that does not reproduce the syndrome counts as a logical failure
 (reported as `invalid`).
 
+## Rare events: fault-count bands
+
+At low `p` the ML failure rate can be far below `1/shots`, and a plain run
+certifies no failures at all. ML failures need many faults, so they concentrate
+at fault counts `K` (the number of fired mechanisms) well above the mean. A
+**fault-count band** samples only shots with `lo ≤ K ≤ hi`, drawn exactly from
+the prior law conditioned on that event:
+
+```python
+problem.band_mass(12, 60)          # exact P(12 <= K <= 60) (Poisson-binomial)
+plain = qcb.benchmark(problem, decoders, shots=100_000, seed=1)
+band  = qcb.benchmark(problem, decoders, shots=20_000, seed=2, fault_band=(12, 60))
+qcb.population_bracket([plain, band])
+# {'lower': ..., 'upper': ..., 'joint_confidence': 0.95, 'band_rows': [...], ...}
+```
+
+Given `K` in the band, every shot fails ML with the same probability, so the
+number of certified failures `F` among `n` band shots is exactly binomial:
+
+* **lower bound:** `Σ_bands P(S)·CP_lower(F_S, n_S; α_lower/#bands)`. Each band
+  pools its own runs with the plain shots whose `K` falls inside it.
+* **upper bound:** `CP_upper(N − #success, N; α_upper)` over the plain shots. A
+  tie or undecided shot counts as a failure here.
+
+Coverage is at least `1 − α_lower − α_upper` (95% by default). A missed proof
+only makes a bound more conservative. The Clopper-Pearson limits assume
+fixed-size runs, so leave `target_failures` unset for runs you pool.
+`population_bracket` rejects results from different problems, repeated seeds,
+and overlapping bands. `qcb.clopper_pearson_lower/upper` expose the one-sided
+limits directly.
+
 ## Performance knobs
 
 ```python
@@ -258,7 +299,22 @@ qcb.benchmark(problem, decoders, shots=10_000, config=cfg, num_workers=16,
 ```
 
 No knob can make a certificate wrong; knobs only trade wall-time against the
-`undecided` fraction. The certificate is cheapest at low physical error rates.
+`undecided` fraction. Two last resorts help with the shots that stay
+`undecided`:
+
+```python
+cfg = qcb.CertConfig(
+    fast_retry_node_budget=1_000_000, pool_cap=20_000_000,  # big cap-free search
+    use_global_route=True, global_time_limit=120.0)         # exact global ILPs
+```
+
+The global route takes an exact syndrome-only ILP witness, then proves by
+infeasibility that no competing class costs less than the witness plus a
+margin (margins 0.1 down to 1e-6). It is slow, about 1–2 minutes on a hard
+distance-12 shot, but it trusts no MIP optimality claim.
+`use_fast_pass=False` switches the cheap first pass off (for A/B tests only).
+
+ The certificate is cheapest at low physical error rates.
 For large circuit-level DEMs at high `p`, expect a growing `undecided` share:
 raise the budgets and seed with Tesseract.
 

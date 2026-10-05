@@ -19,11 +19,12 @@ Quick start::
 from ._version import __version__
 from .config import CertConfig
 from .problem import DecodingProblem
-from .certifier import Certifier, Certificate
+from .certifier import Certifier, Certificate, ROUTES
 from .decoders import (Role, Decoder, FunctionDecoder, BPOSD, Tesseract, Simplex,
                        has_tesseract)
 from .benchmark import benchmark, certify_shots
-from .results import BenchmarkResult, clopper_pearson
+from .results import (BenchmarkResult, clopper_pearson, clopper_pearson_lower,
+                      clopper_pearson_upper, population_bracket)
 from . import codes
 
 
@@ -38,5 +39,6 @@ __all__ = [
     "__version__", "CertConfig", "DecodingProblem", "Certifier", "Certificate",
     "Role", "Decoder", "FunctionDecoder", "BPOSD", "Tesseract",
     "Simplex", "has_tesseract", "benchmark", "certify_shots", "BenchmarkResult",
-    "clopper_pearson", "codes", "selftest",
+    "clopper_pearson", "clopper_pearson_lower", "clopper_pearson_upper",
+    "population_bracket", "ROUTES", "codes", "selftest",
 ]
