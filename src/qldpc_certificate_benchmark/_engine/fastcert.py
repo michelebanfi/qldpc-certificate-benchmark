@@ -49,7 +49,7 @@ def _dual_row_phi(sector, s):
     fired = np.flatnonzero(np.asarray(s) != 0).astype(np.int64)
     if not fired.size:
         return None
-    dual = _lp_dual_charges(sector, fired)
+    dual = _lp_dual_charges(sector, fired, reduced=False)
     if dual is None:
         return None
     row_phi = np.zeros(sector.Hdec.shape[0] + len(sector.powers), dtype=np.float64)

@@ -19,6 +19,7 @@ from .constants import (
     EPS_TIE, CLUSTER_SLACK, DEC_OK, V_SUCCESS, V_FAIL,
 )
 from .kernels import _cluster_labels_core
+from .relaxations import _max_packing
 from .sector import pack_class, _witness_eval
 
 def _ensure_cluster_graph(sector):
@@ -35,7 +36,7 @@ def _ensure_cluster_graph(sector):
         sector.graph_indices = np.ascontiguousarray(A.indices, dtype=np.int32)
 
 
-def _lp_dual_charges(sector, D):
+def _lp_dual_charges(sector, D, reduced=True):
     """Verified feasible dual charges phi for the fired detectors D.
 
     Any phi >= 0 with  sum_{d in rows(j) cap D} phi_d <= w_j  for every column
@@ -44,21 +45,17 @@ def _lp_dual_charges(sector, D):
     costs >= Phi = sum(phi).  The LP (HiGHS) maximises Phi; feasibility is then
     re-verified in numpy and enforced by down-scaling, so a solver inaccuracy
     can never corrupt the separation test.  Returns (phi, wred) with the
-    reduced weights wred = w - per-column charges >= 0, or None on failure.
+    reduced weights wred = w - per-column charges >= 0 (None unless
+    ``reduced``), or None on failure.
     """
-    from scipy.optimize import linprog
     w = sector.w
     sub = sector.Hdec[D, :] != 0                    # |D| x n
     touch = np.flatnonzero(sub.any(axis=0))
     A_ub = sub[:, touch].T.astype(np.float64)       # one constraint per column
-    try:
-        res = linprog(-np.ones(D.size), A_ub=A_ub, b_ub=w[touch],
-                      bounds=(0, None), method="highs")
-    except Exception:
+    x = _max_packing(A_ub, w[touch])
+    if x is None:
         return None
-    if not res.success or res.x is None:
-        return None
-    phi = np.maximum(np.asarray(res.x, dtype=np.float64), 0.0)
+    phi = np.maximum(x, 0.0)
     lhs = A_ub @ phi
     ratio = float(np.max(lhs / w[touch]))           # touch-columns have w > 0
     if ratio > 1.0:
@@ -69,6 +66,8 @@ def _lp_dual_charges(sector, D):
         lhs = A_ub @ phi
         if not np.all(lhs <= w[touch]):
             return None
+    if not reduced:
+        return phi, None
     charges = sub.T.astype(np.float64) @ phi        # per-column total charge
     wred = np.maximum(w - charges, 0.0)             # >= -O(ulp) by feasibility;
     return phi, wred                                # clip absorbed by CLUSTER_SLACK

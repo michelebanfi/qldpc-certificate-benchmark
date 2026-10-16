@@ -28,6 +28,102 @@ from .constants import ST_MIN, ST_PROVED, ST_BUDGET
 _GAP_TOL = 1e-10
 
 
+# --- max-packing LP (the covering dual of every shot) -------------------------
+# The covering dual is solved once per shot and is small (~10-50 variables), so
+# linprog(method="highs") spends 50-70% of it in scipy's wrapper (input checks,
+# per-option validation).  _max_packing hands HiGHS the model linprog builds,
+# with the options linprog sets, and applies linprog's validity check: the
+# solution is bit-identical, 2-3x faster.  It uses scipy's vendored highspy
+# (scipy >= 1.15, a private module), so it is self-checked against linprog once
+# per process; linprog is used whenever that module is missing or misbehaves.
+# Soundness never depends on it: callers re-verify the returned vector.
+_HIGHS = None        # None = not probed yet; False = use linprog; else (module, options)
+_LINPROG_TOL = np.sqrt(1e-9) * 10    # linprog's _check_result tolerance
+
+
+def _max_packing_linprog(A, b):
+    from scipy.optimize import linprog
+    try:
+        res = linprog(-np.ones(A.shape[1]), A_ub=A, b_ub=b, bounds=(0, None),
+                      method="highs")
+    except Exception:
+        return None
+    if not res.success or res.x is None:
+        return None
+    return np.asarray(res.x, dtype=np.float64)
+
+
+def _max_packing_highs(h, opts, A, b):
+    n_rows, n = A.shape
+    cols, rows = np.nonzero(A.T)               # column-major order = CSC of A
+    start = np.zeros(n + 1, dtype=np.int32)
+    np.cumsum(np.bincount(cols, minlength=n), out=start[1:])
+    highs = h._Highs()
+    if highs.passOptions(opts) == h.HighsStatus.kError:
+        return None
+    # flat passModel(num_col, num_row, num_nz, a_format=colwise, sense=minimize,
+    #                offset, cost, col_lower, col_upper, row_lower, row_upper,
+    #                a_start, a_index, a_value, integrality)
+    if highs.passModel(n, n_rows, int(rows.size), 1, 1, 0.0,
+                       np.full(n, -1.0), np.zeros(n), np.full(n, np.inf),
+                       np.full(n_rows, -np.inf), b, start, rows.astype(np.int32),
+                       A.T[A.T != 0], np.zeros(n, dtype=np.int32)) \
+            == h.HighsStatus.kError:
+        return None
+    if highs.run() == h.HighsStatus.kError:
+        return None
+    if highs.getModelStatus() != h.HighsModelStatus.kOptimal:
+        return None
+    sol = highs.getSolution()
+    x = np.array(sol.col_value, dtype=np.float64)
+    slack = b - np.array(sol.row_value, dtype=np.float64)
+    fun = highs.getInfo().objective_function_value
+    if (np.isnan(x).any() or np.isnan(fun) or np.isnan(slack).any()
+            or not np.all(x >= -_LINPROG_TOL) or (slack < -_LINPROG_TOL).any()):
+        return None                            # where linprog reports status 4
+    return x
+
+
+def _highs_direct():
+    global _HIGHS
+    if _HIGHS is None:
+        _HIGHS = False
+        try:
+            from scipy.optimize._highspy import _core as h
+            opts = h.HighsOptions()
+            opts.presolve = "on"
+            opts.highs_debug_level = 0
+            opts.log_to_console = False
+            opts.output_flag = False
+            opts.simplex_strategy = 1          # dual simplex, as linprog sets it
+            # degenerate (many optima) check LP: same vertex as linprog or bust
+            A = np.array([[1, 1, 0, 0], [0, 1, 1, 0], [0, 0, 1, 1], [1, 0, 0, 1],
+                          [1, 0, 1, 0], [1, 0, 0, 0], [0, 0, 0, 1]], dtype=np.float64)
+            A = np.asfortranarray(A)
+            b = np.array([1.0, 1.0, 1.0, 1.0, 1.5, 0.7, 0.9])
+            ref = _max_packing_linprog(A, b)
+            got = _max_packing_highs(h, opts, A, b)
+            if ref is not None and got is not None and np.array_equal(ref, got):
+                _HIGHS = (h, opts)
+        except Exception:
+            pass
+    return _HIGHS
+
+
+def _max_packing(A, b):
+    """max sum(x) s.t. A x <= b, x >= 0, for a 0/1 matrix A (dense float64).
+
+    Returns x, or None when the LP is not solved to optimality -- exactly the
+    result of linprog(-1, A_ub=A, b_ub=b, bounds=(0, None), method="highs")."""
+    direct = _highs_direct()
+    if direct:
+        try:
+            return _max_packing_highs(*direct, A, b)
+        except Exception:
+            pass
+    return _max_packing_linprog(A, b)
+
+
 def _lp_root_bound(H_aug, row_active, b, w):
     """LP-relaxation lower bound on min{w^T x : A x = b (mod 2), x in {0,1}^n}.
 
