@@ -22,6 +22,11 @@
   decoders run jointly and/or separately (`decoder_vs_ml`).
 - `combine_sector_verdicts`: the separate-decoding verdict of a shot.
 
+**Speed**
+- The A* kernels index arrays with unsigned subscripts, so Numba no longer
+  emits a negative-index wraparound check on every access: ~1.45x faster
+  searches, bit-identical results (slightly faster than a line-by-line C port).
+
 ## 0.2.0
 
 **Soundness**
