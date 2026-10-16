@@ -31,6 +31,11 @@
   1.7-3x faster, bit-identical solutions.  It uses scipy's vendored highspy
   (scipy >= 1.15), self-checked against `linprog` once per process, and falls
   back to `linprog` otherwise.
+- Pool workers started with `forkserver` or `spawn` (always the case on
+  Linux, where BLAS threads make the parent multi-threaded) now start in
+  parallel instead of one after another: 8 workers on Linux 16.4 s -> 6.3 s
+  for an 800-shot run.  Each shot travels with its task, so workers no longer
+  hold a copy of every syndrome.
 
 ## 0.2.0
 
