@@ -215,7 +215,7 @@ class JointComparison:
 
 def compare_joint_separate(problem, shots: int = 1000, *, partition=None, seed=0,
                            joint_decoders=None, separate_decoders=None,
-                           seeders="auto", config: CertConfig = DEFAULT_CFG,
+                           seeders=None, config: CertConfig = DEFAULT_CFG,
                            num_workers=None, progress: bool = True,
                            mp_context=None) -> JointComparison:
     """Certify joint and separate ML decoding on the same shots.
@@ -236,9 +236,9 @@ def compare_joint_separate(problem, shots: int = 1000, *, partition=None, seed=0
         is set up separately for the X and the Z problem, so pass built-in
         names, :class:`Decoder` objects, or ``FunctionDecoder(factory=...)``
         (a bare function cannot tell the two sectors apart).
-    seeders : "auto", list, or None
-        Bracket seeders, applied to each of the three problems (see
-        :func:`benchmark`).  They are measured too, in both modes.
+    seeders : None, "auto", decoder, or list of decoders
+        Certificate helpers for each of the three problems (see
+        :func:`benchmark`); never scored.
     seed, config, num_workers, progress, mp_context : as in :func:`benchmark`.
 
     Returns

@@ -1,7 +1,8 @@
 """Circuit-level certified benchmark from a Stim circuit.
 
 Uses PyMatching (pip install pymatching) as the decoder under test, driven
-through ``certify_shots`` with Stim's own sampler and batch decoding.
+through ``certify_shots`` with Stim's own sampler and batch decoding, next to
+BP+OSD and (when installed) Tesseract run live on the same shots.
 """
 import stim
 import qldpc_certificate_benchmark as qcb
@@ -22,6 +23,8 @@ if __name__ == "__main__":
             circuit.detector_error_model(decompose_errors=True))
         predictions["pymatching"] = m.decode_batch(dets)
     except ImportError:
-        print("pymatching not installed; certifying BP+OSD only")
-    result = qcb.certify_shots(problem, dets, obs, predictions=predictions)
+        print("pymatching not installed; skipping it")
+    decoders = ["bp_osd"] + (["tesseract"] if qcb.has_tesseract() else [])
+    result = qcb.certify_shots(problem, dets, obs, predictions=predictions,
+                               decoders=decoders)
     print(result)

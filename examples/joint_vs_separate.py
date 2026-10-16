@@ -20,9 +20,8 @@ px, py, pz = (rng.uniform(0.01, 0.03, n) for _ in range(3))
 joint = qcb.DecodingProblem.from_css_code_pauli(Hx, Hz, px, py, pz,
                                                 name="[[72,12,6]] Pauli noise")
 
-# "your decoder" (role PROBE), run jointly and separately; the default seeders
-# (BP+OSD-CS, Tesseract when installed) are reported in both modes as well
-mine = qcb.BPOSD(osd_method="osd0", name="bp+osd0", role="probe")
+# "your decoder", scored jointly and separately on the same shots
+mine = qcb.BPOSD(osd_method="osd0", name="bp+osd0")
 
 if __name__ == "__main__":
     cmp = qcb.compare_joint_separate(joint, shots=2000, seed=0,

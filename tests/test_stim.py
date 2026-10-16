@@ -34,7 +34,7 @@ def test_stim_samples_certify():
     prob = qcb.DecodingProblem.from_stim_circuit(c)
     syn, obs = c.compile_detector_sampler(seed=1).sample(100, separate_observables=True)
     res = qcb.certify_shots(prob, syn, obs, predictions={"none": np.zeros_like(obs)},
-                            num_workers=1, progress=False)
+                            decoders=["bp_osd"], num_workers=1, progress=False)
     c = res.counts()
     assert c["undecided"] <= 5
     assert res.ml_bracket()["lb"] <= res.ler("bp_osd")["ler"] + 0.05

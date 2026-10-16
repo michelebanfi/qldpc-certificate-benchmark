@@ -17,18 +17,20 @@ It works on any independent-error decoding problem:
 * any `(H, L, priors)` triple you build yourself.
 
 Here is an example: a rotated surface code, d=5, 5 rounds, circuit-level
-p=0.005, 2000 Stim shots, PyMatching as the decoder under test
+p=0.005, 2000 Stim shots, with PyMatching, BP+OSD and Tesseract as the decoders
+under test
 ([`examples/stim_surface_code.py`](examples/stim_surface_code.py)):
 
 ```
 Certified ML benchmark -- rotated surface d=5, p=0.005 (m=120, n=1679, k=1)
-  shots: 2000   wall: 9.3s   verdicts: 1992 success / 8 fail / 0 tie / 0 undecided
-  ML LER certified bracket: [4.000e-03, 4.000e-03]   (95% CI-widened: [1.992e-03, 7.206e-03])
+  shots: 2000   wall: 2.4s   verdicts: 1992 success / 8 fail / 0 tie / 0 undecided
+  ML LER certified bracket: [4.000e-03, 4.000e-03]
+  population ML LER, 95% joint (Clopper-Pearson): [1.728e-03, 7.866e-03]
 
   decoder       role              LER  95% CI                  recov. intrin. unkn.  p(worse than ML)
   pymatching    probe       6.500e-03  [3.47e-03, 1.11e-02]        8       5     0             0.113
-  bp_osd        seed        4.500e-03  [2.06e-03, 8.53e-03]        2       7     0               0.5
-  tesseract     seed        4.000e-03  [1.73e-03, 7.87e-03]        0       8     0                 1
+  bp_osd        probe       4.500e-03  [2.06e-03, 8.53e-03]        2       7     0               0.5
+  tesseract     probe       4.000e-03  [1.73e-03, 7.87e-03]        0       8     0                 1
 ```
 
 On these shots, ML provably fails on exactly 8 (the bracket is closed).
@@ -214,30 +216,36 @@ result.save("run1")        # run1.json (summary) + run1.npz (per-shot arrays)
 `result.verdict`, `result.ok[name]`, and `result.ran[name]` hold the per-shot
 arrays **in shot order**.
 
-## Decoders and roles (why the benchmark stays independent)
+## Decoders and seeders (why the benchmark stays independent)
 
-Every decoder has a role:
+Decoders are measured; seeders only help the certificate:
 
-| role         | measured | may tighten the certificate | default for                           |
-|--------------|:--------:|:---------------------------:|---------------------------------------|
-| `PROBE`      | ✓        | ✗                           | your decoders                         |
-| `SEED`       | ✓        | ✓ (re-verified)             | `BPOSD`, `Tesseract` (via `seeders`)  |
-| `CROSSCHECK` | ✓        | ✗                           | `Simplex` (exact MLE)                 |
+| passed as     | role         | scored            | may tighten the certificate                  |
+|---------------|--------------|:-----------------:|:--------------------------------------------:|
+| `decoders=`   | `PROBE`      | ✓ on every shot   | ✗                                            |
+| `seeders=`    | `SEED`       | ✗                 | ✓ (re-verified), only where it is needed     |
+| `crosscheck=` | `CROSSCHECK` | ✓ (first shots)   | ✗                                            |
 
-The bracket is built only from `SEED` decoders plus an internal
-decoder-agnostic anchor. A `PROBE`'s answer structurally cannot influence its
-own certificate, so its comparison with ML is independent. Seeders only make
-certification faster, by lowering the `undecided` fraction. By default
-(`seeders="auto"`) BP+OSD seeds, plus Tesseract when it is installed. Seeding
-with Tesseract is strongly recommended on large circuit-level DEMs. Pass
-`seeders=None` to disable seeding.
+The certificate is built from an internal decoder-agnostic anchor plus the
+seeders you declare, never from a decoder under test. A `PROBE`'s answer
+structurally cannot influence its own certificate, so its comparison with ML is
+independent.
 
-Built-in decoders:
+Seeders are off by default. Declare them with `seeders="auto"` (BP+OSD, plus
+Tesseract when it is installed) or a list, e.g. `seeders=[qcb.Tesseract()]`.
+A seeder runs only on the shots the cheap first pass leaves open (usually a
+small fraction), and its re-verified corrections can only lower the
+`undecided` fraction there, never change a verdict. Seeders are never scored: to benchmark
+BP+OSD or Tesseract, pass it in `decoders=`, where it runs on every shot. The
+same decoder may appear in both lists. `result.meta["seeders"]` records the
+seeders used. Seeding with Tesseract helps on large circuit-level DEMs at high
+`p`.
+
+Built-in decoders (scored when passed in `decoders=`, also usable as seeders):
 
 * `qcb.BPOSD(max_iter=50, osd_method="osd_cs", osd_order=7, **kw)`: BP+OSD from
   Joschka Roffe's [`ldpc`](https://github.com/quantumgizmos/ldpc) package
-  (`ldpc.BpOsdDecoder`). Extra keyword arguments go straight to `ldpc`. Pass
-  `role="probe"` to benchmark it rather than seed with it.
+  (`ldpc.BpOsdDecoder`). Extra keyword arguments go straight to `ldpc`.
 * `qcb.Tesseract(beam=20, beam_climbing=True)`: Google's beam-search MLE
   (`[all]` extra). Keep `beam_climbing=True`: without it, a wider beam gives
   worse answers.
@@ -307,7 +315,7 @@ joint = qcb.DecodingProblem.from_css_code_depolarizing(Hx, Hz, p=0.06)
 x_model, z_model = joint.css_split()   # what separate decoding uses:
                                        # from_css_code(Hx, Hz, 2p/3, "X") / "Z"
 
-mine = qcb.BPOSD(osd_method="osd0", name="bp+osd0", role="probe")
+mine = qcb.BPOSD(osd_method="osd0", name="bp+osd0")
 cmp = qcb.compare_joint_separate(joint, shots=2000,
                                  joint_decoders=[mine],     # on the joint model
                                  separate_decoders=[mine])  # once per sector
@@ -318,9 +326,8 @@ cmp.decoder_vs_ml("bp+osd0", mode="joint", ml="separate")  # beats separate ML?
 ```
 
 A shot is a separate-ML failure iff either sector fails. The paired tests are
-one-sided and resolve uncertified shots against the claim being tested. The
-bracket seeders (`seeders="auto"`: BP+OSD, and Tesseract when installed) run on
-all three problems and are reported in both modes too. A separate decoder is
+one-sided and resolve uncertified shots against the claim being tested.
+`seeders=`, if given, apply to all three problems. A separate decoder is
 set up once per sector, so pass built-in names, `Decoder` objects or
 `FunctionDecoder(factory=...)`: a bare function cannot tell the sectors apart.
 
@@ -368,9 +375,10 @@ margin (margins 0.1 down to 1e-6). It is slow, about 1–2 minutes on a hard
 distance-12 shot, but it trusts no MIP optimality claim.
 `use_fast_pass=False` switches the cheap first pass off (for A/B tests only).
 
- The certificate is cheapest at low physical error rates.
+The certificate is cheapest at low physical error rates.
 For large circuit-level DEMs at high `p`, expect a growing `undecided` share:
-raise the budgets and seed with Tesseract.
+raise the budgets and declare seeders (`seeders=[qcb.Tesseract()]`), which only
+run on the shots that need them.
 
 Results are identical for any `num_workers`. Workers are started with `fork`
 when the calling process is single-threaded. Otherwise they are started with

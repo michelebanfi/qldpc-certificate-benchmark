@@ -62,8 +62,8 @@ def test_user_decoders_and_roles(small_problem):
                          "guess": qcb.FunctionDecoder(obs_guess, output="observables"),
                          "osd0": qcb.BPOSD(osd_method="osd0", name="osd0", role="probe")},
                         shots=80, seed=1, num_workers=1, progress=False)
-    roles = dict(res.decoders)
-    assert roles["zero"] == "probe" and roles["bp_osd"] == "seed"
+    assert dict(res.decoders) == {"zero": "probe", "guess": "probe", "osd0": "probe"}
+    assert res.meta["seeders"] == []                 # no seeders unless declared
     # zero correction is invalid on every shot with a nonzero syndrome
     syn, obs = small_problem.sample(80, seed=1)
     assert res.invalid["zero"].sum() == int(syn.any(axis=1).sum())
@@ -71,6 +71,38 @@ def test_user_decoders_and_roles(small_problem):
     s = res.summary()
     assert s["decoders"]["osd0"]["shots"] == 80
     str(res)
+
+
+def test_seeders_run_only_where_needed_and_are_not_scored(small_problem):
+    calls = []
+
+    def counting(s):                   # an (invalid) correction; only the calls matter
+        calls.append(1)
+        return np.zeros(small_problem.num_mechanisms, dtype=np.uint8)
+
+    seeder = qcb.FunctionDecoder(counting, name="counting", output="correction")
+    cfg = qcb.CertConfig(unified_node_budget=3)       # leave shots to the full certificate
+    res = qcb.benchmark(small_problem, ["bp_osd"], shots=60, seed=3, num_workers=1,
+                        progress=False, seeders=[seeder], config=cfg)
+    left_open = int((res.route != qcb.ROUTES.index("fast")).sum())
+    assert 0 < left_open < 60
+    assert len(calls) == left_open                    # consulted exactly there
+    assert dict(res.decoders) == {"bp_osd": "probe"}  # never scored
+    assert res.meta["seeders"] == ["counting"]
+    assert seeder.role is qcb.Role.PROBE              # the caller's object is untouched
+
+
+def test_seed_role_is_not_a_scored_decoder(small_problem):
+    with pytest.raises(ValueError, match="seeders="):
+        qcb.benchmark(small_problem, [qcb.BPOSD(role="seed")], shots=4,
+                      num_workers=1, progress=False)
+    syn, obs, err = small_problem.sample(30, seed=4, return_errors=True)
+    res = qcb.certify_shots(small_problem, syn, obs, predictions={"truth": err},
+                            seed_corrections={"truth_seed": err}, num_workers=1,
+                            progress=False)
+    assert dict(res.decoders) == {"truth": "probe"}
+    assert res.meta["seeders"] == ["truth_seed"]
+    assert res.ler("truth")["failures"] == 0
 
 
 def test_parallel_matches_serial(small_problem):

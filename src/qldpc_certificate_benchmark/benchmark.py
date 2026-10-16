@@ -1,7 +1,8 @@
 """Benchmark drivers: sample -> decode -> certify, in parallel.
 
 :func:`benchmark` samples shots from a :class:`DecodingProblem`, runs your
-decoders plus the bracket seeders, and certifies every shot.
+decoders, and certifies every shot.  Seeders, if you declare any, only help the
+certificate on the shots its fast pass leaves open, and are never scored.
 :func:`certify_shots` does the same for shots and predictions you computed
 yourself, for example with Stim's samplers and a batch decoder.
 
@@ -51,6 +52,9 @@ class _Precomputed(Decoder):
 
 
 def _resolve_seeders(seeders):
+    """Certificate helpers (role SEED): consulted only on shots the fast pass
+    leaves open, never scored.  ``"auto"`` is BP+OSD, plus Tesseract when it is
+    installed."""
     if seeders is None or seeders is False:
         return []
     if isinstance(seeders, str) and seeders == "auto":
@@ -58,15 +62,19 @@ def _resolve_seeders(seeders):
         if has_tesseract():
             out.append(Tesseract(role=Role.SEED))
         return out
+    if isinstance(seeders, (Decoder, str)) or callable(seeders):
+        seeders = [seeders]
     out = []
     for d in seeders:
-        d = as_decoder(d)
+        d = copy.copy(as_decoder(d))      # the caller's object keeps its role
         d.role = Role.SEED
         out.append(d)
     return out
 
 
-def _build_decoder_list(decoders, seeders, crosscheck):
+def _build_decoder_list(decoders, seeders, crosscheck, scored=()):
+    """The scored decoders (``scored``, ``decoders``, the cross-check), then
+    the seeders."""
     if decoders is None:
         decoders = []
     if isinstance(decoders, dict):
@@ -75,16 +83,21 @@ def _build_decoder_list(decoders, seeders, crosscheck):
         decs = [as_decoder(decoders)]
     else:
         decs = [as_decoder(d) for d in decoders]
-    decs += _resolve_seeders(seeders)
+    decs = list(scored) + decs
     if crosscheck:
         cap = crosscheck if isinstance(crosscheck, int) and crosscheck is not True else 100
         decs.append(Simplex(shot_cap=cap))
+    seeds = [d.name for d in decs if d.role is Role.SEED]
+    if seeds:
+        raise ValueError(f"decoders {seeds} have role 'seed': decoders are scored on "
+                         f"every shot and never seed the certificate; pass certificate "
+                         f"helpers as seeders=[...] instead")
     names = [d.name for d in decs]
     dup = {n for n in names if names.count(n) > 1}
     if dup:
         raise ValueError(f"duplicate decoder names {sorted(dup)}: give each decoder a "
                          f"unique name (e.g. pass a dict {{name: decoder}})")
-    return decs
+    return decs + _resolve_seeders(seeders)
 
 
 # ------------------------------------------------------------ process start
@@ -276,15 +289,17 @@ def _run(problem, decs, cfg, syn, obs, num_workers, target_failures, stop_on,
         sys.stderr.write("\n")
     n_done = next((j for j, r in enumerate(rows) if r is None), shots)
     meta["stopped_early"] = n_done < shots
+    meta["seeders"] = [d.name for d in decs if d.role is Role.SEED]
     return BenchmarkResult.from_rows(
-        rows[:n_done], decoders=[(d.name, d.role.value) for d in decs],
+        rows[:n_done],
+        decoders=[(d.name, d.role.value) for d in decs if d.role is not Role.SEED],
         problem=problem, config=cfg, elapsed=time.time() - t0, meta=meta,
         fault_counts=None if fault_counts is None else fault_counts[:n_done])
 
 
 # ------------------------------------------------------------------ public API
 def benchmark(problem, decoders=None, shots: int = 1000, *, seed=0,
-              seeders="auto", crosscheck=False, config: CertConfig = DEFAULT_CFG,
+              seeders=None, crosscheck=False, config: CertConfig = DEFAULT_CFG,
               num_workers=None, target_failures=None, stop_on=None,
               progress: bool = True, mp_context=None,
               fault_band=None) -> BenchmarkResult:
@@ -294,17 +309,21 @@ def benchmark(problem, decoders=None, shots: int = 1000, *, seed=0,
     ----------
     problem : DecodingProblem
     decoders : decoder, list of decoders, or dict ``{name: decoder}``
-        Each entry is a :class:`Decoder`, a callable ``syndrome -> correction |
-        observables``, or a built-in name (``"bp_osd"``, ``"tesseract"``).  User decoders default to role ``PROBE``, so they never
+        The decoders under test, scored on every shot.  Each entry is a
+        :class:`Decoder`, a callable ``syndrome -> correction | observables``,
+        or a built-in name (``"bp_osd"``, ``"tesseract"``).  They never
         influence the certificate.
     shots : int
         Number of shots to sample.
     seed : int
         RNG seed for sampling.  The run is reproducible for any ``num_workers``.
-    seeders : "auto", list, or None
-        Helper decoders that seed (tighten) the bracket.  ``"auto"`` means
-        BP+OSD, plus Tesseract when it is installed.  Seeders are also
-        measured, but flagged as not independent.  ``None`` disables seeding.
+    seeders : None, "auto", decoder, or list of decoders
+        Certificate helpers: they run only on shots the cheap fast pass leaves
+        open, and their re-verified corrections tighten the certificate there
+        (fewer undecided shots, never a different verdict).  They are never
+        scored -- to benchmark a decoder, pass it in ``decoders``.  ``None``
+        (default) uses none; ``"auto"`` means BP+OSD, plus Tesseract when it
+        is installed.  The names used are recorded in ``result.meta["seeders"]``.
     crosscheck : bool or int
         Add the exact Simplex MLE (needs ``tesseract-decoder``) on the first 100
         shots, or on the first ``crosscheck`` shots when an int is given.  It
@@ -341,7 +360,7 @@ def benchmark(problem, decoders=None, shots: int = 1000, *, seed=0,
 
 
 def certify_shots(problem, syndromes, observables, predictions=None, *,
-                  decoders=None, seed_corrections=None, seeders="auto",
+                  decoders=None, seed_corrections=None, seeders=None,
                   crosscheck=False, config: CertConfig = DEFAULT_CFG,
                   num_workers=None, progress: bool = True,
                   mp_context=None) -> BenchmarkResult:
@@ -357,7 +376,10 @@ def certify_shots(problem, syndromes, observables, predictions=None, *,
     decoders : optional
         Live decoders to also run on these shots (same forms as :func:`benchmark`).
     seed_corrections : dict ``{name: (shots, n) array}``, optional
-        Corrections that may seed the bracket (role ``SEED``).
+        Precomputed corrections used like seeders: consulted only on shots the
+        fast pass leaves open, never scored (pass them in ``predictions`` too
+        to score them).
+    seeders : as in :func:`benchmark`.
     """
     syn = np.ascontiguousarray(np.asarray(syndromes, dtype=np.uint8))
     obs = np.ascontiguousarray(np.asarray(observables, dtype=np.uint8))
@@ -369,7 +391,7 @@ def certify_shots(problem, syndromes, observables, predictions=None, *,
         raise ValueError(f"observables must have shape ({syn.shape[0]}, "
                          f"{problem.num_observables})")
     n, k = problem.num_mechanisms, problem.num_observables
-    pre = []
+    scored, seeds = [], []
 
     def _kind(name, arr):
         arr = np.asarray(arr, dtype=np.uint8)
@@ -386,16 +408,13 @@ def certify_shots(problem, syndromes, observables, predictions=None, *,
 
     for name, arr in (predictions or {}).items():
         a, kind = _kind(name, arr)
-        pre.append(_Precomputed(name, a, kind, Role.PROBE))
+        scored.append(_Precomputed(name, a, kind, Role.PROBE))
     for name, arr in (seed_corrections or {}).items():
         a, kind = _kind(name, arr)
         if kind != "correction":
             raise ValueError(f"seed_corrections[{name!r}] must be (shots, n) corrections")
-        pre.append(_Precomputed(name, a, kind, Role.SEED))
-    decs = pre + _build_decoder_list(decoders, seeders, crosscheck)
-    names = [d.name for d in decs]
-    if len(names) != len(set(names)):
-        raise ValueError(f"duplicate decoder names: {names}")
+        seeds.append(_Precomputed(name, a, kind, Role.SEED))
+    decs = _build_decoder_list(decoders, seeders, crosscheck, scored=scored) + seeds
     meta = {"mode": "certify_shots", "shots_requested": int(syn.shape[0])}
     return _run(problem, decs, config, syn, obs, num_workers, None, None,
                 progress, mp_context, meta)
