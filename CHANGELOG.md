@@ -25,6 +25,11 @@
 - The A* kernels index arrays with unsigned subscripts, so Numba no longer
   emits a negative-index wraparound check on every access: ~1.45x faster
   searches, bit-identical results (slightly faster than a line-by-line C port).
+- The covering-LP dual of every shot is handed to HiGHS directly instead of
+  through `scipy.optimize.linprog`, whose wrapper was 50-70% of the solve:
+  1.7-3x faster, bit-identical solutions.  It uses scipy's vendored highspy
+  (scipy >= 1.15), self-checked against `linprog` once per process, and falls
+  back to `linprog` otherwise.
 
 **Statistics**
 - Rare-event sampling: `benchmark(..., fault_band=(lo, hi))` samples exactly
