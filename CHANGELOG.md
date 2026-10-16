@@ -22,6 +22,9 @@
   every competing class; no MIP optimality claim is trusted).
 - `Certificate.route` and `BenchmarkResult.route_counts()` report which stage
   decided each shot.
+- The A* kernels index arrays with unsigned subscripts, so Numba no longer
+  emits a negative-index wraparound check on every access: ~1.45x faster
+  searches, bit-identical results (slightly faster than a line-by-line C port).
 
 **Statistics**
 - Rare-event sampling: `benchmark(..., fault_band=(lo, hi))` samples exactly
