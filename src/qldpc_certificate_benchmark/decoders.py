@@ -14,13 +14,14 @@ Wrap a plain function with :class:`FunctionDecoder`, or subclass
 Every decoder has a :class:`Role`, which fixes how its answer is used:
 
 ``PROBE``
-    Measured against the certified bracket, and **never** used to build it.
-    This is the decoder under test, so its benchmark is independent of the
-    certificate.  Default for user decoders.
+    Measured against the certified bracket on every shot, and **never** used to
+    build it.  This is the decoder under test, so its benchmark is independent
+    of the certificate.  Every decoder passed as ``decoders=`` is a probe.
 ``SEED``
-    Measured, and its (re-verified) corrections may tighten the bracket.  This
-    speeds up certification, but that decoder's own comparison is then not
-    independent.  Default for the built-in BP+OSD (``ldpc``) and Tesseract helpers.
+    A certificate helper, declared with ``seeders=``: it runs only on shots the
+    cheap fast pass leaves open, and its (re-verified) corrections may tighten
+    the certificate there.  It is never scored; to benchmark the same decoder,
+    pass it in ``decoders=`` as well.
 ``CROSSCHECK``
     Measured and checked for contradictions with the certificate.  Never seeds.
     Used for the exact Simplex MLE.
@@ -197,7 +198,7 @@ class BPOSD(Decoder):
     output = "correction"
 
     def __init__(self, max_iter=50, bp_method="product_sum", schedule="parallel",
-                 osd_method="osd_cs", osd_order=None, name="bp_osd", role=Role.SEED,
+                 osd_method="osd_cs", osd_order=None, name="bp_osd", role=Role.PROBE,
                  **ldpc_kwargs):
         super().__init__(name=name, role=role)
         if osd_order is None:
@@ -235,7 +236,7 @@ class Tesseract(Decoder):
     output = "observables"
 
     def __init__(self, beam=20, beam_climbing=True, det_orders=0, name="tesseract",
-                 role=Role.SEED):
+                 role=Role.PROBE):
         super().__init__(name=name, role=role)
         self.beam = beam
         self.beam_climbing = beam_climbing

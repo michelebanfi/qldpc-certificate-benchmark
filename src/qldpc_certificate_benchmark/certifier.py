@@ -162,12 +162,22 @@ class Certifier:
 
         Every stage is exact on its own, so the order only affects speed:
         ``route`` records which stage decided the shot."""
+        out = self._fast(s, lam_bits)
+        return out if out is not None else self._full(s, lam_bits, seeds)
+
+    def _fast(self, s, lam_bits):
+        """The cap-free unified pass (it never reads seeds), or None."""
+        if not self.cfg.use_fast_pass:
+            return None
+        out = fast_unified(self.sector, s, lam_bits, self.cfg.unified_node_budget)
+        if out is not None:
+            out["escalations"] = 0
+        return out
+
+    def _full(self, s, lam_bits, seeds):
+        """The anchored full certificate and the last resorts (after the fast
+        pass left the shot open)."""
         cfg, sec = self.cfg, self.sector
-        if cfg.use_fast_pass:
-            out = fast_unified(sec, s, lam_bits, cfg.unified_node_budget)
-            if out is not None:
-                out["escalations"] = 0
-                return out
         cap_true, seed_wrong = self._anchor(s, lam_bits)
         cap_true, seed_wrong = self._fold_seeds(s, lam_bits, cap_true, seed_wrong,
                                                 seeds)
@@ -211,15 +221,23 @@ class Certifier:
             details=cert)
 
     def _decode_and_certify(self, s, lam_bits, decoders, shot_idx):
-        """Benchmark path: run every decoder, seed ONLY from SEED-role decoders,
-        certify.  A PROBE's answer never reaches the bracket (structural
-        independence: the seed loop iterates only SEED specs)."""
+        """Benchmark path: run the scored decoders, then certify.  SEED decoders
+        run only when the fast pass leaves the shot open, and are never scored.
+        A scored decoder's answer never reaches the bracket (structural
+        independence: seeds come from SEED decoders only)."""
         sec = self.sector
         ell_true = pack_class(lam_bits, sec.powers)
-        results = {d.name: d._run(sec, s, shot_idx) for d in decoders}
-        seeds = [results[d.name].correction for d in decoders
-                 if d.role is Role.SEED and results[d.name].correction is not None]
-        cert = self._run(s, lam_bits, seeds)
+        scored = [d for d in decoders if d.role is not Role.SEED]
+        results = {d.name: d._run(sec, s, shot_idx) for d in scored}
+        cert = self._fast(s, lam_bits)
+        if cert is None:
+            seeds = []
+            for d in decoders:
+                if d.role is Role.SEED:
+                    corr = d._run(sec, s, shot_idx).correction
+                    if corr is not None:
+                        seeds.append(corr)
+            cert = self._full(s, lam_bits, seeds)
         out = {
             "verdict": int(cert["verdict"]),
             "nodes": int(cert["nodes_total"]),

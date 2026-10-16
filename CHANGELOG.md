@@ -36,6 +36,20 @@
   container, 16.4 s -> 6.3 s for an 800-shot run.  Each shot travels with its
   task, so workers no longer hold a copy of every syndrome.
 
+**Seeders**
+- **Behavior change:** seeders are off by default (`seeders=None` in
+  `benchmark` and `certify_shots`); declare them with `seeders="auto"`
+  (BP+OSD, plus Tesseract when installed) or a list.
+- A seeder runs only on the shots the cheap first pass leaves open, and it is
+  never scored: seeders no longer appear among the result's decoders, and
+  `result.meta["seeders"]` records them.  ML verdicts, bounds and routes are
+  unchanged for the same seeders; on circuit-level runs that used the old
+  `"auto"` default, the whole run is 3-4.4x faster.
+- To benchmark BP+OSD or Tesseract, pass it in `decoders=`: `BPOSD` and
+  `Tesseract` now default to role `probe`, and a decoder with role `seed` in
+  `decoders=` is rejected.  `certify_shots(seed_corrections=...)` corrections
+  are no longer scored either (pass them in `predictions` too to score them).
+
 **Statistics**
 - Rare-event sampling: `benchmark(..., fault_band=(lo, hi))` samples exactly
   from the priors conditioned on the fault count `K`.

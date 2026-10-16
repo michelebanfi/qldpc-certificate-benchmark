@@ -24,8 +24,8 @@ def main(argv=None):
     elif a.cmd == "demo":
         Hx, Hz, Lx, Lz = qcb.codes.bb_72_12_6()
         prob = qcb.DecodingProblem.from_css_code(Hx, Hz, a.p, name="[[72,12,6]] X-errors")
-        res = qcb.benchmark(prob, decoders=[qcb.BPOSD(osd_method="osd0", name="bp+osd0",
-                                                      role="probe")],
+        res = qcb.benchmark(prob, decoders=[qcb.BPOSD(osd_method="osd0", name="bp+osd0"),
+                                            qcb.BPOSD()],
                             shots=a.shots, num_workers=a.workers)
         print(res)
     return 0

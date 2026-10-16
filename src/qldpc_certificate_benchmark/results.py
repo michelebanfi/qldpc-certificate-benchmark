@@ -245,6 +245,7 @@ class BenchmarkResult:
              "escalated": int(self.escalated.sum()),
              "clustered_frac": float(self.clustered.mean()) if self.shots else 0.0,
              "routes": self.route_counts(),
+             "seeders": list(self.meta.get("seeders", [])),
              "decoders": {}, "crosscheck_contradictions": self.crosscheck_contradictions()}
         for name, role in self.decoders:
             e = {"role": role, **self.ler(name)}
@@ -289,9 +290,9 @@ class BenchmarkResult:
         if cc:
             lines.append(f"\n  exact-MLE contradictions with proven verdicts: {cc} "
                          f"(expected 0)")
-        if any(r == "seed" for _, r in self.decoders):
-            lines.append("\n  note: 'seed' decoders helped build the bracket, so their "
-                         "comparison to ML is not independent.")
+        if s["seeders"]:
+            lines.append(f"\n  certificate seeders (not scored, run only where the "
+                         f"fast pass left a shot open): {', '.join(s['seeders'])}")
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
