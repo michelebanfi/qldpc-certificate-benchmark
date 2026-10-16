@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import copy
 import os
+import pickle
 import sys
+import tempfile
 import time
 import warnings
 from multiprocessing import cpu_count, get_context
@@ -147,41 +149,60 @@ def _pin_threads():
         pass
 
 
-def _init_worker(problem, decoders, cfg, syn, obs, warm=True):
+def _init_worker(problem, decoders, cfg, warm_shot, warm=True):
     if not warm:                        # in-process: let errors propagate directly
-        return _init_worker_body(problem, decoders, cfg, syn, obs, warm)
+        return _init_worker_body(problem, decoders, cfg, warm_shot, warm)
     # A Pool silently respawns a worker whose initializer raises, forever.
     # Record the error instead and re-raise it from the first task, so the
     # parent receives the real traceback.
     try:
-        _init_worker_body(problem, decoders, cfg, syn, obs, warm)
+        _init_worker_body(problem, decoders, cfg, warm_shot, warm)
     except BaseException:
         import traceback
         _W["init_error"] = traceback.format_exc()
 
 
-def _init_worker_body(problem, decoders, cfg, syn, obs, warm):
+def _init_worker_spilled(path):
+    """Initializer for 'forkserver'/'spawn' workers: load the payload from a file.
+
+    Pool writes each worker's initargs into a pipe, and the child reads them
+    only after re-importing the main module.  A payload larger than the pipe
+    buffer therefore blocks the parent until that child has finished
+    importing, and the workers start one after another (~1 s each).  A file
+    path keeps the pipe write small, so all workers start in parallel."""
+    try:
+        with open(path, "rb") as fh:
+            payload = pickle.load(fh)
+    except BaseException:
+        import traceback
+        _W["init_error"] = traceback.format_exc()
+        return
+    _init_worker(*payload)
+
+
+def _init_worker_body(problem, decoders, cfg, warm_shot, warm):
     if warm:
         _pin_threads()
     cert = Certifier(problem, cfg)
     decs = [copy.copy(d) for d in decoders]
     for d in decs:
         d._setup(problem, cert.sector)
-    _W.update(cert=cert, decs=decs, syn=syn, obs=obs)
-    if warm and len(syn):
+    _W.update(cert=cert, decs=decs)
+    if warm and warm_shot is not None:
         # compile every kernel before the first timed shot (never in the parent:
         # the parent must stay single-threaded so that forking stays safe)
-        i = int(np.argmax(syn.any(axis=1)))
-        cert._decode_and_certify(np.ascontiguousarray(syn[i], dtype=np.int8),
-                                 np.asarray(obs[i], dtype=np.int64) & 1, decs, None)
+        _do_shot((None,) + warm_shot)
 
 
-def _do_shot(i):
+def _do_shot(task):
+    """task = (shot index, syndrome row, observables row); the shot travels with
+    its task, so workers never hold a copy of every syndrome."""
+    i, s, lam = task
     w = _W
     if "init_error" in w:
         raise RuntimeError("worker initialisation failed:\n" + w["init_error"])
-    s = np.ascontiguousarray(w["syn"][i], dtype=np.int8)
-    lam = np.asarray(w["obs"][i], dtype=np.int64) & 1
+    s = np.ascontiguousarray(s, dtype=np.int8)
+    lam = np.asarray(lam, dtype=np.int64) & 1
     t0 = time.perf_counter()
     row = w["cert"]._decode_and_certify(s, lam, w["decs"], i)
     row["time"] = time.perf_counter() - t0
@@ -218,21 +239,39 @@ def _run(problem, decs, cfg, syn, obs, num_workers, target_failures, stop_on,
             sys.stderr.flush()
         return target_failures is not None and fails >= target_failures
 
+    tasks = ((i, syn[i], obs[i]) for i in range(shots))
     if num_workers == 1:
-        _init_worker(problem, decs, cfg, syn, obs, warm=False)
-        for i in range(shots):
-            if _tick(*_do_shot(i)):
+        _init_worker(problem, decs, cfg, None, warm=False)
+        for task in tasks:
+            if _tick(*_do_shot(task)):
                 break
     else:
-        ctx = get_context(_choose_context(mp_context, (problem, decs, cfg)))
-        # imap (ordered) keeps results in shot order, so an early stop on
-        # target_failures leaves a contiguous prefix of the shots.
-        with ctx.Pool(num_workers, initializer=_init_worker,
-                      initargs=(problem, decs, cfg, syn, obs)) as pool:
-            for i, row in pool.imap(_do_shot, range(shots), chunksize=1):
-                if _tick(i, row):
-                    pool.terminate()
-                    break
+        method = _choose_context(mp_context, (problem, decs, cfg))
+        ctx = get_context(method)
+        j = int(np.argmax(syn.any(axis=1)))         # warm-up: first nonzero syndrome
+        payload = (problem, decs, cfg, (syn[j], obs[j]))
+        spill = None
+        if method == "fork":                        # inherited, never pickled
+            init, initargs = _init_worker, payload
+        else:
+            fd, spill = tempfile.mkstemp(prefix="qcb-workers-", suffix=".pkl")
+            with os.fdopen(fd, "wb") as fh:
+                pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            init, initargs = _init_worker_spilled, (spill,)
+        try:
+            # imap (ordered) keeps results in shot order, so an early stop on
+            # target_failures leaves a contiguous prefix of the shots.
+            with ctx.Pool(num_workers, initializer=init, initargs=initargs) as pool:
+                for i, row in pool.imap(_do_shot, tasks, chunksize=1):
+                    if _tick(i, row):
+                        pool.terminate()
+                        break
+        finally:
+            if spill is not None:
+                try:
+                    os.remove(spill)
+                except OSError:
+                    pass
     if progress:
         sys.stderr.write("\n")
     n_done = next((j for j, r in enumerate(rows) if r is None), shots)
