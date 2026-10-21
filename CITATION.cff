@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use this library, please cite our paper."
+title: qldpc-certificate-benchmark
+type: software
+authors:
+  - given-names: Michele
+    family-names: Banfi
+    email: michi.banfi01@gmail.com
+repository-code: "https://github.com/michelebanfi/qldpc-certificate-benchmark"
+url: "https://pypi.org/project/qldpc-certificate-benchmark/"
+license: MIT
+preferred-citation:
+  type: generic
+  title: "Certified Non-Degenerate Maximum-Likelihood Benchmarking of Quantum LDPC Decoders"
+  authors:
+    - given-names: Michele
+      family-names: Banfi
+    - given-names: Marco
+      family-names: Ferrari
+    - given-names: Antonino
+      family-names: Favano
+    - given-names: Alberto
+      family-names: Tarable
+    - given-names: Luca
+      family-names: Barletta
+  year: 2026
+  month: 10
+  doi: "10.48550/arXiv.2610.28008"
+  url: "https://arxiv.org/abs/2610.28008"
+  identifiers:
+    - type: other
+      value: "arXiv:2610.28008"
+      description: arXiv identifier (primary class cs.IT)

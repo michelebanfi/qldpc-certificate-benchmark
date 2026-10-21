@@ -2,6 +2,12 @@
 
 **Certified maximum-likelihood benchmarking for quantum error-correction decoders.**
 
+[![arXiv](https://img.shields.io/badge/arXiv-2610.28008-b31b1b.svg)](https://arxiv.org/abs/2610.28008)
+
+The method is described in our paper
+[*Certified Non-Degenerate Maximum-Likelihood Benchmarking of Quantum LDPC
+Decoders*](https://arxiv.org/abs/2610.28008) ([how to cite it](#citing)).
+
 Decoder papers usually compare against other heuristic decoders, because the
 true maximum-likelihood (ML) decoder is intractable to run. This library
 avoids that problem. For every shot it **proves** whether ML decoding would
@@ -344,9 +350,20 @@ qldpc-certificate-benchmark demo --p 0.04 --shots 500   # BP+OSD-0 on [[72,12,6]
 
 ## Citing
 
-If you use this library, please cite our paper:
+If you use this library, please cite our paper
+([arXiv:2610.28008](https://arxiv.org/abs/2610.28008)):
 
-> *arXiv reference coming soon.*
+```bibtex
+@misc{banfi2026certifiednondegeneratemaximumlikelihoodbenchmarking,
+  title={Certified Non-Degenerate Maximum-Likelihood Benchmarking of Quantum LDPC Decoders},
+  author={Michele Banfi and Marco Ferrari and Antonino Favano and Alberto Tarable and Luca Barletta},
+  year={2026},
+  eprint={2610.28008},
+  archivePrefix={arXiv},
+  primaryClass={cs.IT},
+  url={https://arxiv.org/abs/2610.28008},
+}
+```
 
 ## License
 
